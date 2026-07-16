@@ -1,18 +1,10 @@
 plugins {
-    id 'fabric-loom' version '1.2-SNAPSHOT'
+    id 'net.fabricmc.fabric-loom' version '1.18.0-alpha.7'
     id 'maven-publish'
 }
 
 version = project.mod_version
 group = project.maven_group
-
-repositories {
-    // Add repositories to retrieve artifacts from in here.
-    // You should only use this when depending on other mods because
-    // Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
-    // See https://docs.gradle.org/current/userguide/declaring_repositories.html
-    // for more information about repositories.
-}
 
 repositories {
     exclusiveContent {
@@ -26,29 +18,22 @@ repositories {
             includeGroup "maven.modrinth"
         }
     }
+    mavenCentral()
 }
 
 dependencies {
     // To change the versions see the gradle.properties file
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-    modImplementation(fabricApi.module("fabric-rendering-fluids-v1", project.fabric_version))
-    modImplementation(fabricApi.module("fabric-key-binding-api-v1", project.fabric_version))
-    modImplementation(fabricApi.module("fabric-resource-loader-v0", project.fabric_version))
-    modImplementation(fabricApi.module("fabric-api-base", project.fabric_version))
-    modImplementation(fabricApi.module("fabric-block-view-api-v2", project.fabric_version))
-    modImplementation(fabricApi.module("fabric-rendering-fluids-v1", project.fabric_version))
-    modImplementation("net.fabricmc.fabric-api:fabric-rendering-data-attachment-v1:0.3.38+73761d2e9a")
-    modImplementation(fabricApi.module("fabric-resource-loader-v0", project.fabric_version))
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    // Fabric API - use full bundle
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    modImplementation "maven.modrinth:sodium:mc1.20.2-0.5.3"
-    modImplementation "maven.modrinth:iris:1.6.9+1.20.2"
+    implementation "maven.modrinth:sodium:mc26.2-0.9.1-fabric"
+    implementation "maven.modrinth:iris:1.11.2+26.2-fabric"
 
-    modRuntimeOnly 'org.anarres:jcpp:1.4.14'
-    modRuntimeOnly 'io.github.douira:glsl-transformer:2.0.0-pre13'
-
-    modRuntimeOnly 'net.java.dev.jna:jna:5.9.0'
+    runtimeOnly 'org.anarres:jcpp:1.4.14'
+    runtimeOnly 'io.github.douira:glsl-transformer:2.0.0-pre13'
+    runtimeOnly 'net.java.dev.jna:jna:5.9.0'
 }
 
 processResources {
@@ -60,27 +45,15 @@ processResources {
     }
 }
 
-def targetJavaVersion = 17
+def targetJavaVersion = 25
 tasks.withType(JavaCompile).configureEach {
-    // ensure that the encoding is set to UTF-8, no matter what the system default is
-    // this fixes some edge cases with special characters not displaying correctly
-    // see http://yodaconditions.net/blog/fix-for-java-file-encoding-problems-with-gradle.html
-    // If Javadoc is generated, this must be specified in that task too.
     it.options.encoding = "UTF-8"
-    if (targetJavaVersion >= 10 || JavaVersion.current().isJava10Compatible()) {
-        it.options.release = targetJavaVersion
-    }
+    it.options.release = targetJavaVersion
 }
 
 java {
-    def javaVersion = JavaVersion.toVersion(targetJavaVersion)
-    if (JavaVersion.current() < javaVersion) {
-        toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
-    }
-    archivesBaseName = project.archives_base_name
-    // Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-    // if it is present.
-    // If you remove this line, sources will not be generated.
+    toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
+    base.archivesName = project.archives_base_name
     withSourcesJar()
 }
 
@@ -97,93 +70,33 @@ publishing {
             from components.java
         }
     }
-
-    // See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
     repositories {
-        // Add repositories to publish to here.
-        // Notice: This block does NOT have the same function as the block in the top level.
-        // The repositories here will be used for publishing your artifact, not for
-        // retrieving dependencies.
     }
 }
 
+// LWJGL dependencies
+project.ext.lwjglVersion = "3.4.1"
+project.ext.jomlVersion = "1.10.4"
 
-import org.gradle.internal.os.OperatingSystem
-
-project.ext.lwjglVersion = "3.3.1"
-
-switch (OperatingSystem.current()) {
-    case OperatingSystem.LINUX:
-        def osArch = System.getProperty("os.arch")
-        project.ext.lwjglNatives = osArch.startsWith("arm") || osArch.startsWith("aarch64")
-                ? "natives-linux-${osArch.contains("64") || osArch.startsWith("armv8") ? "arm64" : "arm32"}"
-                : "natives-linux"
-        break
-    case OperatingSystem.WINDOWS:
-        project.ext.lwjglNatives = "natives-windows"
-        break
-}
-
-repositories {
-    mavenCentral()
-}
-project.ext.lwjglNatives = "natives-windows"
+// Detect OS for native library selection
+def osName = System.getProperty("os.name").toLowerCase()
+project.ext.lwjglNatives = osName.contains("windows") ? "natives-windows" : "natives-linux"
 
 dependencies {
+    // LWJGL BOM for version management
     implementation platform("org.lwjgl:lwjgl-bom:$lwjglVersion")
 
-    include(implementation("org.lwjgl:lwjgl-meshoptimizer"))
-    include(implementation("org.lwjgl:lwjgl-vma"))
-    include(implementation("org.lwjgl:lwjgl-vulkan"))
-    include(implementation("org.lwjgl:lwjgl-shaderc"))
-    include(implementation("org.lwjgl:lwjgl-spvc"))
-
-    include(runtimeOnly("org.lwjgl:lwjgl-meshoptimizer:$lwjglVersion:$lwjglNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl-vma:$lwjglVersion:$lwjglNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl-shaderc:$lwjglVersion:$lwjglNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl-spvc:$lwjglVersion:$lwjglNatives"))
-
-    include(implementation("org.lwjgl:lwjgl-meshoptimizer:$lwjglVersion:$lwjglNatives"))
-    include(implementation("org.lwjgl:lwjgl-vma:$lwjglVersion:$lwjglNatives"))
-    include(implementation("org.lwjgl:lwjgl-shaderc:$lwjglVersion:$lwjglNatives"))
-    include(implementation("org.lwjgl:lwjgl-spvc:$lwjglVersion:$lwjglNatives"))
-
-
-    implementation "org.lwjgl:lwjgl"
-    implementation "org.lwjgl:lwjgl-glfw"
-    implementation "org.lwjgl:lwjgl-opengl"
-    runtimeOnly "org.lwjgl:lwjgl::$lwjglNatives"
-    runtimeOnly "org.lwjgl:lwjgl-glfw::$lwjglNatives"
-    runtimeOnly "org.lwjgl:lwjgl-opengl::$lwjglNatives"
-}
-
-
-project.ext.lwjglVersion = "3.3.1"
-project.ext.jomlVersion = "1.10.4"
-project.ext.winNatives = "natives-windows"
-project.ext.linuxNatives = "natives-linux"
-
-dependencies {
-    include(implementation("org.lwjgl:lwjgl:$lwjglVersion"))
-    include(implementation("org.lwjgl:lwjgl-vulkan:$lwjglVersion"))
-    include(implementation("org.lwjgl:lwjgl-vma:$lwjglVersion"))
-    include(implementation("org.joml:joml:${jomlVersion}"))
-    include(runtimeOnly("org.lwjgl:lwjgl-vma:$lwjglVersion:$winNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl-vma:$lwjglVersion:$linuxNatives"))
-
-    include(implementation("org.lwjgl:lwjgl-glfw:$lwjglVersion"))
-    include(runtimeOnly("org.lwjgl:lwjgl-glfw:$lwjglVersion:$winNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl-glfw:$lwjglVersion:$linuxNatives"))
-    include(implementation("org.lwjgl:lwjgl-stb:$lwjglVersion"))
-    include(runtimeOnly("org.lwjgl:lwjgl-stb:$lwjglVersion:$winNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl-stb:$lwjglVersion:$linuxNatives"))
-    include(implementation("org.lwjgl:lwjgl-openal:$lwjglVersion"))
-    include(runtimeOnly("org.lwjgl:lwjgl-openal:$lwjglVersion:$winNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl-openal:$lwjglVersion:$linuxNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl:$lwjglVersion:$winNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl:$lwjglVersion:$linuxNatives"))
-
-    include(implementation("org.lwjgl:lwjgl-shaderc:$lwjglVersion"))
-    include(runtimeOnly("org.lwjgl:lwjgl-shaderc:$lwjglVersion:$winNatives"))
-    include(runtimeOnly("org.lwjgl:lwjgl-shaderc:$lwjglVersion:$linuxNatives"))
+    // Core Vulkan dependencies - bundled with mod
+    // All LWJGL provided by Minecraft 26.2 runtime (3.4.1-snapshot).
+    // Bundling ANY lwjgl native causes ABI conflict → VK_ERROR_DEVICE_LOST.
+    // Shaderc/spvc/meshoptimizer excluded — shader compilation deferred to build time.
+    implementation("org.lwjgl:lwjgl:$lwjglVersion")
+    implementation("org.lwjgl:lwjgl-glfw:$lwjglVersion")
+    implementation("org.lwjgl:lwjgl-opengl:$lwjglVersion")
+    implementation("org.lwjgl:lwjgl-vulkan:$lwjglVersion")
+    implementation("org.lwjgl:lwjgl-vma:$lwjglVersion")
+    implementation("org.lwjgl:lwjgl-shaderc:$lwjglVersion")
+    implementation("org.lwjgl:lwjgl-spvc:$lwjglVersion")
+    implementation("org.lwjgl:lwjgl-meshoptimizer:$lwjglVersion")
+    implementation("org.joml:joml:${jomlVersion}")
 }

@@ -12,6 +12,7 @@ import me.cortex.vulkanite.lib.descriptors.DescriptorSetLayoutBuilder;
 import me.cortex.vulkanite.lib.descriptors.DescriptorUpdateBuilder;
 import me.cortex.vulkanite.lib.descriptors.VDescriptorPool;
 import me.cortex.vulkanite.lib.descriptors.VDescriptorSetLayout;
+import me.cortex.vulkanite.lib.memory.VAccelerationStructure;
 import me.cortex.vulkanite.lib.memory.VBuffer;
 import me.cortex.vulkanite.lib.memory.VGImage;
 import me.cortex.vulkanite.lib.memory.VImage;
@@ -20,36 +21,33 @@ import me.cortex.vulkanite.lib.other.VSampler;
 import me.cortex.vulkanite.lib.other.sync.VSemaphore;
 import me.cortex.vulkanite.lib.pipeline.RaytracePipelineBuilder;
 import me.cortex.vulkanite.lib.pipeline.VRaytracePipeline;
-import net.coderbot.iris.gl.buffer.ShaderStorageBuffer;
-import net.coderbot.iris.gl.buffer.ShaderStorageBufferHolder;
-import net.coderbot.iris.gl.buffer.ShaderStorageInfo;
-import net.coderbot.iris.texture.pbr.PBRTextureHolder;
-import net.coderbot.iris.texture.pbr.PBRTextureManager;
-import net.coderbot.iris.uniforms.CapturedRenderingState;
-import net.coderbot.iris.uniforms.CelestialUniforms;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.Camera;
-import net.minecraft.client.render.CameraSubmersionType;
-import net.minecraft.client.texture.AbstractTexture;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.RegistryKeys;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.RotationAxis;
-import net.minecraft.world.dimension.DimensionType;
+import net.irisshaders.iris.gl.buffer.ShaderStorageBuffer;
+import net.irisshaders.iris.pbr.texture.PBRTextureHolder;
+import net.irisshaders.iris.pbr.texture.PBRTextureManager;
+import net.irisshaders.iris.uniforms.CapturedRenderingState;
+import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.texture.AbstractTexture;
+import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.minecraft.resources.Identifier;
 
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
-import org.joml.Vector4f;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Optional;
 
-import static net.coderbot.iris.uniforms.CelestialUniforms.getSunAngle;
-import static net.coderbot.iris.uniforms.CelestialUniforms.isDay;
 import static org.lwjgl.opengl.EXTSemaphore.GL_LAYOUT_GENERAL_EXT;
 import static org.lwjgl.opengl.GL11C.glFinish;
 import static org.lwjgl.opengl.GL11C.glFlush;
+import static org.lwjgl.opengl.GL11C.glGetError;
+import static org.lwjgl.opengl.GL11C.GL_NO_ERROR;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.util.vma.Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
@@ -57,11 +55,14 @@ import static org.lwjgl.vulkan.KHRRayTracingPipeline.*;
 import static org.lwjgl.vulkan.VK10.*;
 
 public class VulkanPipeline {
+    private static final Logger LOGGER = LoggerFactory.getLogger("Vulkanite/RTPipeline");
+
     private final VContext ctx;
     private final AccelerationManager accelerationManager;
     private final VCommandPool singleUsePool;
 
     private VRaytracePipeline[] raytracePipelines;
+    private RaytracingShaderSet[] rtPasses;
     private VDescriptorSetLayout commonLayout;
     private VDescriptorSetLayout customtexLayout;
     private VDescriptorSetLayout storageBufferLayout;
@@ -73,169 +74,91 @@ public class VulkanPipeline {
     private final VSampler sampler;
     private final VSampler ctexSampler;
 
-    private final SharedImageViewTracker composite0mainView;
     private final SharedImageViewTracker[] customTextureViews;
     private final SharedImageViewTracker blockAtlasView;
     private final SharedImageViewTracker blockAtlasNormalView;
     private final SharedImageViewTracker blockAtlasSpecularView;
 
-    private final VImage placeholderImage;
-    private final VImageView placeholderImageView;
+    private final VImage fallbackImage;
+    private final VImageView fallbackImageView;
+    private final FrameUniforms uniforms;
 
     private int fidx;
+    private int frameId;
+    private int frameCounter;
+    private boolean loggedSsboBindingOnce = false;
+    private VSemaphore previousSemaphore;
 
-    public VulkanPipeline(VContext ctx, AccelerationManager accelerationManager, RaytracingShaderSet[] passes, int[] ssboIds, VGImage[] customTextures) {
+    public static final Identifier LOCATION_BLOCKS = TextureAtlas.LOCATION_BLOCKS;
+
+    public VulkanPipeline(VContext ctx, AccelerationManager accelerationManager, RaytracingShaderSet[] passes,
+            int[] ssboIds, VGImage[] customTextures) {
         this.ctx = ctx;
         this.accelerationManager = accelerationManager;
         this.singleUsePool = ctx.cmd.createSingleUsePool();
+        this.uniforms = new FrameUniforms(ctx);
 
-        {
-            this.customTextureViews = new SharedImageViewTracker[customTextures.length];
-            for(int i = 0; i < customTextures.length; i++) {
-                int index = i;
-                this.customTextureViews[i] = new SharedImageViewTracker(ctx, ()->customTextures[index]);
-            }
-
-            this.composite0mainView = new SharedImageViewTracker(ctx, null);
-            this.blockAtlasView = new SharedImageViewTracker(ctx, ()->{
-                AbstractTexture blockAtlas = MinecraftClient.getInstance().getTextureManager().getTexture(new Identifier("minecraft", "textures/atlas/blocks.png"));
-                return ((IVGImage)blockAtlas).getVGImage();
-            });
-            this.blockAtlasNormalView = new SharedImageViewTracker(ctx, ()->{
-                AbstractTexture blockAtlas = MinecraftClient.getInstance().getTextureManager().getTexture(new Identifier("minecraft", "textures/atlas/blocks.png"));
-                PBRTextureHolder holder = PBRTextureManager.INSTANCE.getOrLoadHolder(blockAtlas.getGlId());//((TextureAtlasExtension)blockAtlas).getPBRHolder()
-                return ((IVGImage)holder.getNormalTexture()).getVGImage();
-            });
-            this.blockAtlasSpecularView = new SharedImageViewTracker(ctx, ()->{
-                AbstractTexture blockAtlas = MinecraftClient.getInstance().getTextureManager().getTexture(new Identifier("minecraft", "textures/atlas/blocks.png"));
-                PBRTextureHolder holder = PBRTextureManager.INSTANCE.getOrLoadHolder(blockAtlas.getGlId());//((TextureAtlasExtension)blockAtlas).getPBRHolder()
-                return ((IVGImage)holder.getSpecularTexture()).getVGImage();
-            });
-            this.placeholderImage = ctx.memory.createImage2D(4, 4, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            this.placeholderImageView = new VImageView(ctx, placeholderImage);
-
-            try (var stack = stackPush()) {
-                var cmd = singleUsePool.createCommandBuffer();
-                cmd.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-
-                var barriers = VkImageMemoryBarrier.calloc(1, stack);
-                applyImageBarrier(barriers.get(0), placeholderImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_MEMORY_READ_BIT);
-                vkCmdPipelineBarrier(cmd.buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, null, null, barriers);
-                cmd.end();
-
-                ctx.cmd.submit(0, VkSubmitInfo.calloc(stack).sType$Default().pCommandBuffers(stack.pointers(cmd)));
-
-                Vulkanite.INSTANCE.addSyncedCallback(cmd::enqueueFree);
-            }
+        this.customTextureViews = new SharedImageViewTracker[customTextures.length];
+        for (int i = 0; i < customTextures.length; i++) {
+            int index = i;
+            this.customTextureViews[i] = new SharedImageViewTracker(ctx, () -> customTextures[index]);
         }
 
-        this.sampler = new VSampler(ctx, a->a.magFilter(VK_FILTER_NEAREST)
-                .minFilter(VK_FILTER_NEAREST)
-                .mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
-                .addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                .addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                .addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                .compareOp(VK_COMPARE_OP_NEVER)
-                .maxLod(1)
-                .borderColor(VK_BORDER_COLOR_INT_OPAQUE_BLACK)
-                .maxAnisotropy(1.0f));
+        this.fallbackImage = ctx.memory.createImage2D(4, 4, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        this.fallbackImageView = new VImageView(ctx, fallbackImage);
 
-        this.ctexSampler = new VSampler(ctx, a->a.magFilter(VK_FILTER_LINEAR)
-                .minFilter(VK_FILTER_LINEAR)
-                .mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
-                .addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                .addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                .addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                .compareOp(VK_COMPARE_OP_NEVER)
-                .maxLod(1)
-                .borderColor(VK_BORDER_COLOR_INT_OPAQUE_BLACK)
-                .maxAnisotropy(1.0f));
+        this.blockAtlasView = new SharedImageViewTracker(ctx, () -> {
+            AbstractTexture atlas = Minecraft.getInstance().getTextureManager().getTexture(LOCATION_BLOCKS);
+            return atlas != null ? ((IVGImage) atlas).getVGImage().map(v -> (VImage) v).orElse((VImage) fallbackImage)
+                    : (VImage) fallbackImage;
+        });
 
-        try {
-            commonLayout = new DescriptorSetLayoutBuilder()
-                    .binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_ALL)// camera data
-                    .binding(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_SHADER_STAGE_ALL)// funni acceleration buffer
-                    .binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)//block texture
-                    .binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)//block texture normal
-                    .binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)//block texture specular
-                    // Reordered these so output texture is last... this means you can dynamically add more output textures without messing other ids
-                    .binding(6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_ALL)// output texture
-                    .build(ctx);
+        this.blockAtlasNormalView = new SharedImageViewTracker(ctx, () -> {
+            AbstractTexture atlas = Minecraft.getInstance().getTextureManager().getTexture(LOCATION_BLOCKS);
+            return atlas != null ? getPbrAtlas(atlas, h -> ((IVGImage) h.normalTexture()).getVGImage())
+                    : (VImage) fallbackImage;
+        });
 
-            DescriptorSetLayoutBuilder ctexLayoutBuilder = new DescriptorSetLayoutBuilder();
-            for (int i = 0; i < customTextureViews.length; i++) {
-                ctexLayoutBuilder.binding(i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL);
-            }
+        this.blockAtlasSpecularView = new SharedImageViewTracker(ctx, () -> {
+            AbstractTexture atlas = Minecraft.getInstance().getTextureManager().getTexture(LOCATION_BLOCKS);
+            return atlas != null ? getPbrAtlas(atlas, h -> ((IVGImage) h.specularTexture()).getVGImage())
+                    : (VImage) fallbackImage;
+        });
 
-            customtexLayout = ctexLayoutBuilder.build(ctx);
+        transitionFallbackImageLayout();
 
-            DescriptorSetLayoutBuilder ssboLayoutBuilder = new DescriptorSetLayoutBuilder();
-            for (int id : ssboIds) {
-                ssboLayoutBuilder.binding(id, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_ALL);
-            }
+        this.sampler = createSampler(VK_FILTER_NEAREST, 1.0f);
+        this.ctexSampler = createSampler(VK_FILTER_LINEAR, 1.0f);
 
-            storageBufferLayout = ssboLayoutBuilder.build(ctx);
-
-            //TODO: use frameahead count instead of just... 10
-            commonDescriptorPool = new VDescriptorPool(ctx, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 10, commonLayout.types);
-            commonDescriptorPool.allocateSets(commonLayout);
-
-            customtexDescriptorPool = new VDescriptorPool(ctx, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 10, customtexLayout.types);
-            customtexDescriptorPool.allocateSets(customtexLayout);
-
-            storageBufferDescriptorPool = new VDescriptorPool(ctx, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 10, storageBufferLayout.types);
-            storageBufferDescriptorPool.allocateSets(storageBufferLayout);
-
-            raytracePipelines = new VRaytracePipeline[passes.length];
-            for (int i = 0; i < passes.length; i++) {
-                var builder = new RaytracePipelineBuilder()
-                        .addLayout(commonLayout)
-                        .addLayout(accelerationManager.getGeometryLayout())
-                        .addLayout(customtexLayout)
-                        .addLayout(storageBufferLayout);
-                passes[i].apply(builder);
-                raytracePipelines[i] = builder.build(ctx, 1);
-            }
-
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        buildLayoutsAndPipelines(ssboIds, passes);
     }
 
-    private static void applyImageBarrier(VkImageMemoryBarrier barrier, VImage image, int targetLayout, int targetAccess) {
-        barrier.sType$Default()
-                .sType$Default()
-                .image(image.image())
-                .oldLayout(VK_IMAGE_LAYOUT_GENERAL)
-                .newLayout(targetLayout)
-                .srcAccessMask(0)
-                .dstAccessMask(targetAccess)
-                .subresourceRange(e->e.levelCount(1).layerCount(1).aspectMask(VK_IMAGE_ASPECT_COLOR_BIT));
-    }
-
-
-    private VSemaphore previousSemaphore;
-
-    private int frameId;
-
-    private static RegistryKey<DimensionType> of(String id) {
-        return RegistryKey.of(RegistryKeys.DIMENSION_TYPE, new Identifier(id));
-    }
-
-
-    public void renderPostShadows(VGImage outImg, Camera camera, ShaderStorageBuffer[] ssbos) {
-        if (ctx.sync.isDeviceLost()) {
+    public void renderPostShadows(int width, int height, Camera camera, ShaderStorageBuffer[] ssbos) {
+        if (ctx.sync.isDeviceLost())
             return;
-        }
         this.singleUsePool.doReleases();
-        PBRTextureManager.notifyPBRTexturesChanged();
+
+        final int[] signalBuffers = collectSharedSsbos(ssbos);
+        final int[] signalTextures = collectSharedTextures();
+        final int[] signalTexLayouts = collectSharedTextureLayouts();
+
+        if (++frameCounter % 60 == 0) {
+            LOGGER.debug("renderPostShadows frame={} fidx={} {}x{} ssboGlIds=[{}]",
+                    frameCounter, fidx, width, height,
+                    java.util.Arrays.toString(signalBuffers));
+        }
 
         var in = ctx.sync.createSharedBinarySemaphore();
-        in.glSignal(new int[0], new int[]{outImg.glId}, new int[]{GL_LAYOUT_GENERAL_EXT});
+        in.glSignal(signalBuffers, signalTextures, signalTexLayouts);
         glFlush();
 
-        var tlasLink = ctx.sync.createBinarySemaphore();
+        int glErr = glGetError();
+        if (glErr != GL_NO_ERROR && frameCounter % 60 == 0) {
+            LOGGER.warn("GL error {} after glSignal at frame={}", glErr, frameCounter);
+        }
 
+        var tlasLink = ctx.sync.createBinarySemaphore();
         var tlas = accelerationManager.buildTLAS(in, tlasLink);
         if (tlas == null) {
             glFinish();
@@ -244,158 +167,44 @@ public class VulkanPipeline {
             return;
         }
 
+        VBuffer uboBuffer = uniforms.update(fidx, camera, frameId++);
+
+        long commonSet = commonDescriptorPool.get(fidx);
+        long ctexSet = customtexDescriptorPool.get(fidx);
+        long ssboSet = storageBufferDescriptorPool.get(fidx);
+        updateDescriptorSets(commonSet, ctexSet, ssboSet, uboBuffer, tlas, ssbos);
+
+        var cmd = singleUsePool.createCommandBuffer();
+        cmd.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+        recordPipelineBarriers(cmd);
+        recordTraceRays(cmd, commonSet, ctexSet, ssboSet, width, height);
+        cmd.end();
+
         var out = ctx.sync.createSharedBinarySemaphore();
-        VBuffer uboBuffer;
-        {
-            uboBuffer = ctx.memory.createBuffer(1024,
-                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-                    0, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-            long ptr = uboBuffer.map();
-            MemoryUtil.memSet(ptr, 0, 1024);
-            {
-                ByteBuffer bb = MemoryUtil.memByteBuffer(ptr, 1024);
+        var fence = ctx.sync.createFence();
+        ctx.cmd.submit(0, new VCmdBuff[] { cmd }, new VSemaphore[] { tlasLink },
+                new int[] { VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR }, new VSemaphore[] { out }, fence);
 
-                Vector3f tmpv3 = new Vector3f();
-                Matrix4f invProjMatrix = new Matrix4f();
-                Matrix4f invViewMatrix = new Matrix4f();
+        var semCapture = previousSemaphore;
+        previousSemaphore = out;
+        ctx.sync.addCallback(fence, () -> {
+            tlasLink.free();
+            in.free();
+            cmd.enqueueFree();
+            fence.free();
+            if (semCapture != null)
+                semCapture.free();
+        });
 
-                CapturedRenderingState.INSTANCE.getGbufferProjection().invert(invProjMatrix);
-                new Matrix4f(CapturedRenderingState.INSTANCE.getGbufferModelView()).translate(camera.getPos().toVector3f().negate()).invert(invViewMatrix);
-
-                invProjMatrix.transformProject(-1, -1, 0, 1, tmpv3).get(bb);
-                invProjMatrix.transformProject(+1, -1, 0, 1, tmpv3).get(4*Float.BYTES, bb);
-                invProjMatrix.transformProject(-1, +1, 0, 1, tmpv3).get(8*Float.BYTES, bb);
-                invProjMatrix.transformProject(+1, +1, 0, 1, tmpv3).get(12*Float.BYTES, bb);
-                invViewMatrix.get(Float.BYTES * 16, bb);
-
-                Uniforms.getSunPosition().get(Float.BYTES * 32, bb);
-                Uniforms.getMoonPosition().get(Float.BYTES * 36, bb);
-
-                bb.putInt(Float.BYTES * 40, frameId++);
-
-                int flags = Uniforms.isEyeInWater()&3; 
-                flags += Uniforms.getWorld().getDimension().hasSkyLight()?4:0;
-                flags += Uniforms.getWorld().getDimensionEffects().shouldBrightenLighting() ? 8 : 0;
-                
-                enum World {
-                    OVERWORLD,
-                    THE_NETHER,
-                    THE_END,
-                    OVERWORLD_CAVES
-                }
-                World world_type;
-
-                if (Uniforms.getWorld().getDimensionKey().equals(of("overworld"))) {
-                    world_type = World.OVERWORLD;
-                } else if (Uniforms.getWorld().getDimensionKey().equals(of("the_nether"))) {
-                    world_type = World.THE_NETHER;
-                } else if (Uniforms.getWorld().getDimensionKey().equals(of("the_end"))) {
-                    world_type = World.THE_END;
-                } else if (Uniforms.getWorld().getDimensionKey().equals(of("overworld_caves"))) {
-                    world_type = World.OVERWORLD_CAVES;
-                } else {
-                    world_type = World.OVERWORLD;
-                }
-                
-
-                bb.putInt(Float.BYTES * 41, flags);
-                bb.putInt(Float.BYTES * 42, world_type.ordinal());
-                bb.rewind();
-            }
-            uboBuffer.unmap();
-            uboBuffer.flush();
-
-            long commonSet = commonDescriptorPool.get(fidx);
-            long ctexSet = customtexDescriptorPool.get(fidx);
-            long ssboSet = storageBufferDescriptorPool.get(fidx);
-
-            var updater = new DescriptorUpdateBuilder(ctx, 7, placeholderImageView)
-                    .set(commonSet)
-                    .uniform(0, uboBuffer)
-                    .acceleration(1, tlas)
-                    .imageSampler(3, blockAtlasView.getView(), sampler)
-                    .imageSampler(4, blockAtlasNormalView.getView(), sampler)
-                    .imageSampler(5, blockAtlasSpecularView.getView(), sampler)
-                    .imageStore(6, composite0mainView.getView(()->outImg));
-            updater.apply();
-
-            updater = new DescriptorUpdateBuilder(ctx, customTextureViews.length, placeholderImageView)
-                    .set(ctexSet);
-
-            for (int i = 0; i < customTextureViews.length; i++) {
-                updater.imageSampler(i, customTextureViews[i].getView(), ctexSampler);
-            }
-            updater.apply();
-
-            updater = new DescriptorUpdateBuilder(ctx, ssbos.length, placeholderImageView)
-                    .set(ssboSet);
-
-            for (ShaderStorageBuffer ssbo : ssbos) {
-                updater.buffer(ssbo.getIndex(), ((IVGBuffer) ssbo).getBuffer());
-            }
-            updater.apply();
-
-            //TODO: dont use a single use pool for commands like this...
-            var cmd = singleUsePool.createCommandBuffer();
-            cmd.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-
-            try (var stack = stackPush()) {
-                var barriers = VkImageMemoryBarrier.calloc(4 + customTextureViews.length, stack);
-                applyImageBarrier(barriers.get(), composite0mainView.getImage(), VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_WRITE_BIT);
-                applyImageBarrier(barriers.get(), blockAtlasView.getImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_READ_BIT);
-                var image = blockAtlasNormalView.getImage();
-                if (image != null) applyImageBarrier(barriers.get(), image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_READ_BIT);
-                image = blockAtlasSpecularView.getImage();
-                if (image != null) applyImageBarrier(barriers.get(), image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_READ_BIT);
-
-                for(SharedImageViewTracker customtexView : customTextureViews) {
-                   applyImageBarrier(barriers.get(), customtexView.getImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_READ_BIT);
-                }
-
-                barriers.limit(barriers.position());
-                barriers.rewind();
-                vkCmdPipelineBarrier(cmd.buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, null, null, barriers);
-            }
-
-            for (var pipeline : raytracePipelines) {
-                pipeline.bind(cmd);
-                pipeline.bindDSet(cmd, commonSet, accelerationManager.getGeometrySet(), ctexSet, ssboSet);
-                pipeline.trace(cmd, outImg.width, outImg.height, 1);
-            }
-
-            cmd.end();
-            var fence = ctx.sync.createFence();
-            ctx.cmd.submit(0, new VCmdBuff[]{cmd}, new VSemaphore[]{tlasLink}, new int[]{VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR}, new VSemaphore[]{out}, fence);
-
-
-            var semCapture = previousSemaphore;
-            previousSemaphore = out;
-            ctx.sync.addCallback(fence, ()->{
-                tlasLink.free();
-                in.free();
-                cmd.enqueueFree();
-                fence.free();
-
-                uboBuffer.free();
-                if (semCapture != null) {
-                    semCapture.free();
-                }
-            });
-        }
-
-        out.glWait(new int[0], new int[]{outImg.glId}, new int[]{GL_LAYOUT_GENERAL_EXT});
+        out.glWait(signalBuffers, signalTextures, signalTexLayouts);
         glFlush();
 
-        fidx++;
-        fidx %= 10;
-
+        fidx = (fidx + 1) % 10;
     }
 
     public void destory() {
-        for (var pass : raytracePipelines) {
+        for (var pass : raytracePipelines)
             pass.free();
-        }
         commonLayout.free();
         customtexLayout.free();
         storageBufferLayout.free();
@@ -405,23 +214,312 @@ public class VulkanPipeline {
         ctx.sync.checkFences();
         singleUsePool.doReleases();
         singleUsePool.free();
-        if (previousSemaphore != null) {
+        if (previousSemaphore != null)
             previousSemaphore.free();
-        }
-
-        for (SharedImageViewTracker customTexView : customTextureViews) {
+        for (SharedImageViewTracker customTexView : customTextureViews)
             customTexView.free();
-        }
-
-        composite0mainView.free();
         blockAtlasView.free();
         blockAtlasNormalView.free();
         blockAtlasSpecularView.free();
-        placeholderImageView.free();
-        placeholderImage.free();
+        fallbackImageView.free();
+        fallbackImage.free();
         sampler.free();
         ctexSampler.free();
+        uniforms.free();
     }
 
+    private static void applyImageBarrier(VkImageMemoryBarrier barrier, VImage image, int targetLayout,
+            int targetAccess) {
+        barrier.sType$Default()
+                .sType$Default()
+                .image(image.image())
+                .oldLayout(VK_IMAGE_LAYOUT_GENERAL)
+                .newLayout(targetLayout)
+                .srcAccessMask(0)
+                .dstAccessMask(targetAccess)
+                .subresourceRange(e -> e.levelCount(1).layerCount(1).aspectMask(VK_IMAGE_ASPECT_COLOR_BIT));
+    }
 
+    private VImage getPbrAtlas(AbstractTexture atlas,
+            java.util.function.Function<PBRTextureHolder, Optional<VGImage>> mapper) {
+        int atlasGlId = atlas.getTexture().iris$getGlId();
+        var holder = PBRTextureManager.INSTANCE.getOrLoadHolder(atlasGlId);
+        return holder != null ? mapper.apply(holder).map(v -> (VImage) v).orElse(fallbackImage) : fallbackImage;
+    }
+
+    private void transitionFallbackImageLayout() {
+        try (var stack = stackPush()) {
+            var cmd = singleUsePool.createCommandBuffer();
+            cmd.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+            var barriers = VkImageMemoryBarrier.calloc(1, stack);
+            applyImageBarrier(barriers.get(0), fallbackImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_MEMORY_READ_BIT);
+            vkCmdPipelineBarrier(cmd.buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                    null, null, barriers);
+            cmd.end();
+            ctx.cmd.submit(0, VkSubmitInfo.calloc(stack).sType$Default().pCommandBuffers(stack.pointers(cmd)));
+            Vulkanite.INSTANCE.addSyncedCallback(cmd::enqueueFree);
+        }
+    }
+
+    private VSampler createSampler(int filter, float anisotropy) {
+        return new VSampler(ctx, a -> a.magFilter(filter)
+                .minFilter(filter)
+                .mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
+                .addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                .addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                .addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                .compareOp(VK_COMPARE_OP_NEVER)
+                .maxLod(1)
+                .borderColor(VK_BORDER_COLOR_INT_OPAQUE_BLACK)
+                .maxAnisotropy(anisotropy));
+    }
+
+    private void buildLayoutsAndPipelines(int[] ssboIds, RaytracingShaderSet[] passes) {
+        commonLayout = new DescriptorSetLayoutBuilder()
+                .binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_ALL)
+                .binding(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_SHADER_STAGE_ALL)
+                .binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)
+                .binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)
+                .binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)
+                .build(ctx);
+
+        DescriptorSetLayoutBuilder ctexLayoutBuilder = new DescriptorSetLayoutBuilder();
+        for (int i = 0; i < customTextureViews.length; i++) {
+            ctexLayoutBuilder.binding(i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL);
+        }
+        customtexLayout = ctexLayoutBuilder.build(ctx);
+
+        DescriptorSetLayoutBuilder ssboLayoutBuilder = new DescriptorSetLayoutBuilder();
+        for (int id : ssboIds) {
+            ssboLayoutBuilder.binding(id, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_ALL);
+        }
+        storageBufferLayout = ssboLayoutBuilder.build(ctx);
+
+        commonDescriptorPool = new VDescriptorPool(ctx, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 10,
+                commonLayout.types);
+        commonDescriptorPool.allocateSets(commonLayout);
+        customtexDescriptorPool = new VDescriptorPool(ctx, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 10,
+                customtexLayout.types);
+        customtexDescriptorPool.allocateSets(customtexLayout);
+        storageBufferDescriptorPool = new VDescriptorPool(ctx, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 10,
+                storageBufferLayout.types);
+        storageBufferDescriptorPool.allocateSets(storageBufferLayout);
+
+        this.rtPasses = passes;
+        raytracePipelines = new VRaytracePipeline[passes.length];
+        for (int i = 0; i < passes.length; i++) {
+            var builder = new RaytracePipelineBuilder()
+                    .addLayout(commonLayout)
+                    .addLayout(accelerationManager.getGeometryLayout())
+                    .addLayout(customtexLayout)
+                    .addLayout(storageBufferLayout);
+            passes[i].apply(builder);
+            raytracePipelines[i] = builder.build(ctx, 1);
+        }
+    }
+
+    private int[] collectSharedSsbos(ShaderStorageBuffer[] ssbos) {
+        final int[] sharedSsboIds = new int[ssbos.length];
+        final int[] count = { 0 };
+        for (ShaderStorageBuffer ssbo : ssbos) {
+            ((IVGBuffer) ssbo).getBuffer().ifPresent(buf -> sharedSsboIds[count[0]++] = buf.glId);
+        }
+        return Arrays.copyOf(sharedSsboIds, count[0]);
+    }
+
+    private int[] collectSharedTextures() {
+        ArrayList<Integer> texIds = new ArrayList<>();
+        for (SharedImageViewTracker view : new SharedImageViewTracker[] { blockAtlasView, blockAtlasNormalView,
+                blockAtlasSpecularView }) {
+            VImage img = view.getImage();
+            if (img instanceof VGImage vg) {
+                texIds.add(vg.glId);
+            }
+        }
+        return texIds.stream().mapToInt(x -> x).toArray();
+    }
+
+    private int[] collectSharedTextureLayouts() {
+        ArrayList<Integer> layouts = new ArrayList<>();
+        for (SharedImageViewTracker view : new SharedImageViewTracker[] { blockAtlasView, blockAtlasNormalView,
+                blockAtlasSpecularView }) {
+            if (view.getImage() instanceof VGImage) {
+                layouts.add(GL_LAYOUT_GENERAL_EXT);
+            }
+        }
+        return layouts.stream().mapToInt(x -> x).toArray();
+    }
+
+    private void updateDescriptorSets(long commonSet, long ctexSet, long ssboSet, VBuffer uboBuffer,
+            VAccelerationStructure tlas, ShaderStorageBuffer[] ssbos) {
+        new DescriptorUpdateBuilder(ctx, 5, fallbackImageView)
+                .set(commonSet)
+                .uniform(0, uboBuffer)
+                .acceleration(1, tlas) // 此时方法重载完美适配！
+                .imageSampler(3, blockAtlasView.getView(), sampler)
+                .imageSampler(4, blockAtlasNormalView.getView(), sampler)
+                .imageSampler(5, blockAtlasSpecularView.getView(), sampler)
+                .apply();
+
+        final var ctexUpdater = new DescriptorUpdateBuilder(ctx, customTextureViews.length, fallbackImageView)
+                .set(ctexSet);
+        for (int i = 0; i < customTextureViews.length; i++) {
+            ctexUpdater.imageSampler(i, customTextureViews[i].getView(), ctexSampler);
+        }
+        ctexUpdater.apply();
+
+        final var ssboUpdater = new DescriptorUpdateBuilder(ctx, ssbos.length, fallbackImageView).set(ssboSet);
+        final int[] boundCount = { 0 };
+        // Track VkBuffer handles to diagnose whether descriptor updates
+        // actually switch to new buffers after resize
+        StringBuilder ssboVkHandles = (frameCounter % 60 == 0) ? new StringBuilder() : null;
+        for (ShaderStorageBuffer ssbo : ssbos) {
+            ((IVGBuffer) ssbo).getBuffer().ifPresentOrElse(buf -> {
+                ssboUpdater.buffer(ssbo.getIndex(), buf);
+                boundCount[0]++;
+                if (ssboVkHandles != null) {
+                    ssboVkHandles.append(ssbo.getIndex()).append("=0x")
+                            .append(Long.toHexString(buf.buffer())).append(" ");
+                }
+            }, () -> {
+                if (!loggedSsboBindingOnce) {
+                    LOGGER.warn("SSBO index={} has no Vulkan-shared buffer, RT writes to this binding are lost",
+                            ssbo.getIndex());
+                }
+            });
+        }
+        if (!loggedSsboBindingOnce) {
+            LOGGER.debug("renderPostShadows SSBO binding: {}/{} buffers bound to Vulkan descriptor set", boundCount[0],
+                    ssbos.length);
+            for (ShaderStorageBuffer ssbo : ssbos) {
+                LOGGER.info("  ssbo index={} glId={} vkShared={}", ssbo.getIndex(), ssbo.getId(),
+                        ((IVGBuffer) ssbo).getBuffer() != null);
+            }
+            loggedSsboBindingOnce = true;
+        }
+        if (ssboVkHandles != null) {
+            LOGGER.debug("renderPostShadows frame={} ssbo VkBuffer handles: {}", frameCounter,
+                    ssboVkHandles.toString());
+        }
+        ssboUpdater.apply();
+    }
+
+    private void recordPipelineBarriers(VCmdBuff cmd) {
+        try (var stack = stackPush()) {
+            var barriers = VkImageMemoryBarrier.calloc(4 + customTextureViews.length, stack);
+            applyImageBarrier(barriers.get(), blockAtlasView.getImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_SHADER_READ_BIT);
+            var image = blockAtlasNormalView.getImage();
+            if (image != null)
+                applyImageBarrier(barriers.get(), image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_SHADER_READ_BIT);
+            image = blockAtlasSpecularView.getImage();
+            if (image != null)
+                applyImageBarrier(barriers.get(), image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_SHADER_READ_BIT);
+            for (SharedImageViewTracker customtexView : customTextureViews) {
+                applyImageBarrier(barriers.get(), customtexView.getImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_SHADER_READ_BIT);
+            }
+            barriers.limit(barriers.position());
+            barriers.rewind();
+            vkCmdPipelineBarrier(cmd.buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, null, null, barriers);
+        }
+    }
+
+    private void recordTraceRays(VCmdBuff cmd, long commonSet, long ctexSet, long ssboSet, int width, int height) {
+        int prevGroup = Integer.MIN_VALUE;
+        try (var stack = stackPush()) {
+            var memBarrier = VkMemoryBarrier.calloc(1, stack)
+                    .sType$Default()
+                    .srcAccessMask(VK_ACCESS_SHADER_WRITE_BIT)
+                    .dstAccessMask(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+            for (int i = 0; i < raytracePipelines.length; i++) {
+                var pass = rtPasses[i];
+                if (i > 0 && pass.group != prevGroup) {
+                    vkCmdPipelineBarrier(cmd.buffer,
+                            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                            0, memBarrier, null, null);
+                }
+                prevGroup = pass.group;
+
+                int dw = dispatchDim(pass.dispatchW, width);
+                int dh = dispatchDim(pass.dispatchH, height);
+                int dd = Math.max(1, (int) pass.dispatchD);
+                raytracePipelines[i].bind(cmd);
+                raytracePipelines[i].bindDSet(cmd, commonSet, accelerationManager.getGeometrySet(), ctexSet, ssboSet);
+                raytracePipelines[i].trace(cmd, dw, dh, dd);
+            }
+        }
+    }
+
+    private static int dispatchDim(float val, int screenSize) {
+        return val > 1.0f ? (int) val : Math.max(1, (int) (screenSize * val));
+    }
+
+    private static class FrameUniforms {
+        // corners[4](4×16B) + viewInverse(64B) + frameId(4B) + flags(4B) +
+        // world_type(4B)
+        private static final int UBO_SIZE = 256;
+        private final VBuffer[] buffers = new VBuffer[10];
+
+        public FrameUniforms(VContext ctx) {
+            for (int i = 0; i < 10; i++) {
+                buffers[i] = ctx.memory.createBuffer(UBO_SIZE,
+                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                        0, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+            }
+        }
+
+        public VBuffer update(int fidx, Camera camera, int frameId) {
+            VBuffer buf = buffers[fidx];
+            long ptr = buf.map();
+            MemoryUtil.memSet(ptr, 0, UBO_SIZE);
+
+            ByteBuffer bb = MemoryUtil.memByteBuffer(ptr, UBO_SIZE);
+            Vector3f tmpv3 = new Vector3f();
+            Matrix4f invProjMatrix = new Matrix4f();
+            Matrix4f invViewMatrix = new Matrix4f();
+
+            CapturedRenderingState.INSTANCE.getGbufferProjection().invert(invProjMatrix);
+            new Matrix4f(CapturedRenderingState.INSTANCE.getGbufferModelView())
+                    .translate(camera.position().toVector3f().negate()).invert(invViewMatrix);
+
+            invProjMatrix.transformProject(-1, -1, 0, 1, tmpv3).get(bb);
+            invProjMatrix.transformProject(+1, -1, 0, 1, tmpv3).get(4 * Float.BYTES, bb);
+            invProjMatrix.transformProject(-1, +1, 0, 1, tmpv3).get(8 * Float.BYTES, bb);
+            invProjMatrix.transformProject(+1, +1, 0, 1, tmpv3).get(12 * Float.BYTES, bb);
+            invViewMatrix.get(Float.BYTES * 16, bb);
+
+            // Sun/moon position removed — obtained from Iris FrameData SSBO
+            // (lightDir_global)
+            bb.putInt(Float.BYTES * 32, frameId);
+
+            int flags = Uniforms.isEyeInWater() & 3;
+            flags += Uniforms.getWorld().dimensionType().hasSkyLight() ? 4 : 0;
+
+            bb.putInt(Float.BYTES * 33, flags);
+            bb.putInt(Float.BYTES * 34, switch (net.irisshaders.iris.Iris.getCurrentDimension().getName()) {
+                case "the_end" -> 2;
+                case "the_nether" -> 1;
+                default -> 0; // overworld (and custom dims default to overworld)
+            });
+
+            buf.unmap();
+            buf.flush();
+            return buf;
+        }
+
+        public void free() {
+            for (VBuffer buf : buffers) {
+                if (buf != null)
+                    buf.free();
+            }
+        }
+    }
 }

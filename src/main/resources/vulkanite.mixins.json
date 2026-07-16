@@ -2,39 +2,29 @@
   "required": true,
   "minVersion": "0.8",
   "package": "me.cortex.vulkanite.mixin",
-  "compatibilityLevel": "JAVA_17",
+  "compatibilityLevel": "JAVA_25",
   "client": [
-    "iris.MixinNativeImageBackedTexture",
-    "iris.MixinGlResource",
-    "iris.MixinGlTexture",
-    "iris.MixinNewWorldRenderingPipeline",
-    "iris.MixinPackRenderTargetDirectives",
+    "iris.MixinIrisGLDebug",
+    "iris.MixinIrisRenderingPipeline",
     "iris.MixinPBRAtlasTexture",
     "iris.MixinProgramSet",
-    "iris.MixinRenderTarget",
     "iris.MixinShaderPackSourceNames",
+    "iris.MixinShaderProperties",
     "iris.MixinStandardMacros",
     "minecraft.MixinAbstractTexture",
+    "minecraft.MixinGlDebug",
     "minecraft.MixinMinecraftClient",
-    "minecraft.MixinSpriteAtlasTexture",
-    "sodium.MixinRenderRegionManager",
+    "minecraft.MixinTextureAtlas",
     "sodium.MixinRenderSection",
-    "sodium.MixinRenderSectionManager",
-    "sodium.PendingSectionUploadAccessor",
     "sodium.chunk.MixinChunkBuildResult",
     "sodium.chunk.MixinChunkRenderRebuildTask",
-    "sodium.chunk.VertexFormatAccessor",
-    "sodium.gl.MixinCommandList",
-    "sodium.gl.MixinGlBufferArena",
-    "sodium.gl.MixinGLRenderDevice",
-    "sodium.gl.MixinMutableBuffer"
+    "sodium.chunk.VertexFormatAccessor"
   ],
   "injectors": {
     "defaultRequire": 1
   },
   "mixins": [
     "iris.MixinShaderStorageBuffer",
-    "iris.MixinShaderStorageBufferHolder",
     "iris.ShaderStorageBufferHolderAccessor"
   ]
 }

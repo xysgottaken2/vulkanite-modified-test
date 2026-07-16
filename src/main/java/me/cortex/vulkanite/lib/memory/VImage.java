@@ -1,6 +1,7 @@
 package me.cortex.vulkanite.lib.memory;
 
-import java.lang.ref.Cleaner;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class VImage {
     protected VmaAllocator.ImageAllocation allocation;
@@ -9,8 +10,8 @@ public class VImage {
     public final int depth;
     public final int mipLayers;
     public final int format;
-
     public final int dimensions;
+    private static Logger LOGGER = LoggerFactory.getLogger(VImage.class.getName());
 
     VImage(VmaAllocator.ImageAllocation allocation, int width, int height, int depth, int mipLayers, int format) {
         this.allocation = allocation;
@@ -24,8 +25,7 @@ public class VImage {
 
         if (height == 1 && depth == 1) {
             dimensions = 1;
-        }
-        else if(height != 1 && depth == 1) {
+        } else if (height != 1 && depth == 1) {
             dimensions = 2;
         }
 
@@ -33,6 +33,10 @@ public class VImage {
     }
 
     public void free() {
+        if (allocation == null) {
+            LOGGER.warn("Attempted to free VImage that was already freed");
+            return;
+        }
         allocation.free();
         allocation = null;
     }

@@ -1,7 +1,7 @@
 package me.cortex.vulkanite.mixin.sodium;
 
 import me.cortex.vulkanite.client.Vulkanite;
-import me.jellysquid.mods.sodium.client.render.chunk.RenderSection;
+import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;

@@ -1,31 +1,23 @@
 package me.cortex.vulkanite.client.rendering;
 
-import net.coderbot.iris.uniforms.CapturedRenderingState;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.CameraSubmersionType;
-import net.minecraft.client.world.ClientWorld;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.RotationAxis;
-import net.minecraft.world.dimension.DimensionType;
+import net.irisshaders.iris.uniforms.CapturedRenderingState;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 
 import org.joml.Matrix4f;
 import org.joml.Vector4f;
 
-import java.util.Objects;
-
 public class Uniforms {
-
 
     //Copied from CommonUniforms
     static int isEyeInWater() {
-        CameraSubmersionType var0 = MinecraftClient.getInstance().gameRenderer.getCamera().getSubmersionType();
-        if (var0 == CameraSubmersionType.WATER) {
-            return 1;
-        } else if (var0 == CameraSubmersionType.LAVA) {
-            return 2;
-        } else {
-            return var0 == CameraSubmersionType.POWDER_SNOW ? 3 : 0;
-        }
+        var sub = Minecraft.getInstance().gameRenderer.mainCamera().getFluidInCamera();
+        return switch (sub) {
+            case WATER -> 1;
+            case LAVA -> 2;
+            case POWDER_SNOW -> 3;
+            default -> 0;
+        };
     }
 
     //Copied from CelestialUniforms
@@ -38,7 +30,6 @@ public class Uniforms {
         return getCelestialPosition(-100.0F);
     }
 
-
     static Vector4f getCelestialPosition(float y) {
         final float sunPathRotation = -45.0f;
 
@@ -46,23 +37,24 @@ public class Uniforms {
 
         Matrix4f celestial = new Matrix4f(CapturedRenderingState.INSTANCE.getGbufferModelView());
 
-        // This is the same transformation applied by renderSky, however, it's been moved to here.
-        // This is because we need the result of it before it's actually performed in vanilla.
-        celestial.rotate(RotationAxis.POSITIVE_Y.rotationDegrees(-90.0F));
-        celestial.rotate(RotationAxis.POSITIVE_Z.rotationDegrees(sunPathRotation));
-        celestial.rotate(RotationAxis.POSITIVE_X.rotationDegrees(getSkyAngle() * 360.0F));
+        // Use JOML Matrix4f rotation methods (RotationAxis removed in MC 26.2 Mojang mappings)
+        celestial.rotateY((float) Math.toRadians(-90.0F));
+        celestial.rotateZ((float) Math.toRadians(sunPathRotation));
+        celestial.rotateX((float) Math.toRadians(getSkyAngle() * 360.0F));
 
         position = celestial.transform(position);
 
         return position;
     }
 
-    static ClientWorld getWorld() {
-        return MinecraftClient.getInstance().world;
+    static ClientLevel getWorld() {
+        return Minecraft.getInstance().level;
     }
 
     private static float getSkyAngle() {
-        return getWorld().getSkyAngle(CapturedRenderingState.INSTANCE.getTickDelta());
+        // MC 26.2: getSkyAngle/getSunAngle removed, compute from clock time
+        float tickDelta = CapturedRenderingState.INSTANCE.getTickDelta();
+        long dayTime = getWorld().getOverworldClockTime();
+        return ((float)(dayTime % 24000L) + tickDelta) / 24000.0F;
     }
-
 }

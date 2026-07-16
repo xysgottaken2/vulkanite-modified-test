@@ -1,24 +1,17 @@
 package me.cortex.vulkanite.client;
 
 import me.cortex.vulkanite.acceleration.AccelerationManager;
-import me.cortex.vulkanite.acceleration.SharedQuadVkIndexBuffer;
-import me.cortex.vulkanite.client.rendering.VulkanPipeline;
 import me.cortex.vulkanite.lib.base.VContext;
 import me.cortex.vulkanite.lib.base.initalizer.VInitializer;
-import me.jellysquid.mods.sodium.client.render.chunk.RenderSection;
-import me.jellysquid.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
-import net.minecraft.util.Util;
+import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
+import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
 import org.lwjgl.vulkan.*;
 
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.lwjgl.vulkan.EXTDebugUtils.VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
 import static org.lwjgl.vulkan.EXTDescriptorIndexing.VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME;
-import static org.lwjgl.vulkan.KHR16bitStorage.VK_KHR_16BIT_STORAGE_EXTENSION_NAME;
-import static org.lwjgl.vulkan.KHR8bitStorage.VK_KHR_8BIT_STORAGE_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
-import static org.lwjgl.vulkan.KHRBufferDeviceAddress.VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRDeferredHostOperations.VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRExternalFenceCapabilities.VK_KHR_EXTERNAL_FENCE_CAPABILITIES_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRExternalFenceFd.VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME;
@@ -33,13 +26,12 @@ import static org.lwjgl.vulkan.KHRExternalSemaphoreFd.VK_KHR_EXTERNAL_SEMAPHORE_
 import static org.lwjgl.vulkan.KHRExternalSemaphoreWin32.VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRGetMemoryRequirements2.VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRGetPhysicalDeviceProperties2.VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
-import static org.lwjgl.vulkan.KHRRayQuery.VK_KHR_RAY_QUERY_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRShaderDrawParameters.VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRSpirv14.VK_KHR_SPIRV_1_4_EXTENSION_NAME;
 
 public class Vulkanite {
-    public static final boolean IS_WINDOWS = Util.getOperatingSystem() == Util.OperatingSystem.WINDOWS;
+    public static final boolean IS_WINDOWS = System.getProperty("os.name").toLowerCase().contains("win");
 
     public static boolean MEMORY_LEAK_TRACING = true;
 
@@ -54,29 +46,24 @@ public class Vulkanite {
     public Vulkanite() {
         ctx = createVulkanContext();
 
-        //Fill in the shared index buffer with a large count so we (hopefully) dont have to worry about it anymore
-        // SharedQuadVkIndexBuffer.getIndexBuffer(ctx, 30000);
-
         accelerationManager = new AccelerationManager(ctx, 1);
     }
 
     public void upload(List<ChunkBuildOutput> results) {
-        /*
-        if (((IAccelerationBuildResult)result).getAccelerationGeometryData() == null)
-            return;//TODO: delete the chunk section in this case then or something
-        accelerationManager.chunkBuild(result);
-         */
-
+        if (accelerationManager == null)
+            return;
         accelerationManager.chunkBuilds(results);
     }
 
     public void sectionRemove(RenderSection section) {
-        accelerationManager.sectionRemove(section);
+        if (accelerationManager != null)
+            accelerationManager.sectionRemove(section);
     }
 
     public void renderTick() {
         ctx.sync.checkFences();
-        accelerationManager.updateTick();
+        if (accelerationManager != null)
+            accelerationManager.updateTick();
     }
 
     public void fenceTick() {
@@ -92,24 +79,25 @@ public class Vulkanite {
     }
 
     public void destroy() {
-        accelerationManager.cleanup();
+        if (accelerationManager != null)
+            accelerationManager.cleanup();
         ctx.cleanup();
     }
 
     private static VContext createVulkanContext() {
         var init = new VInitializer("Vulkan test", "Vulkanite", 1, 3,
-                new String[]{VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+                new String[] { VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
                         VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
                         VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME,
                         VK_KHR_EXTERNAL_FENCE_CAPABILITIES_EXTENSION_NAME,
-                        //VK_EXT_DEBUG_UTILS_EXTENSION_NAME
+                // VK_EXT_DEBUG_UTILS_EXTENSION_NAME
                 },
                 new String[] {
-                        //"VK_LAYER_KHRONOS_validation",
+                // "VK_LAYER_KHRONOS_validation",
                 });
 
-        //This copies whatever gpu the opengl context is on
-        init.findPhysicalDevice();//glGetString(GL_RENDERER).split("/")[0]
+        // This copies whatever gpu the opengl context is on
+        init.findPhysicalDevice();// glGetString(GL_RENDERER).split("/")[0]
 
         List<String> extensions = new ArrayList<>(List.of(
                 VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
@@ -119,13 +107,12 @@ public class Vulkanite {
                 VK_KHR_SPIRV_1_4_EXTENSION_NAME,
                 VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,
 
-                //VK_KHR_RAY_QUERY_EXTENSION_NAME,
+                // VK_KHR_RAY_QUERY_EXTENSION_NAME,
 
                 VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
                 VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
 
-                VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME
-        ));
+                VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME));
         if (IS_WINDOWS) {
             extensions.addAll(List.of(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
                     VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
@@ -137,20 +124,19 @@ public class Vulkanite {
         }
         init.createDevice(extensions,
                 List.of(),
-                new float[]{1.0f, 0.9f},
+                new float[] { 1.0f, 0.9f },
                 features -> features.shaderInt16(true).shaderInt64(true).multiDrawIndirect(true), List.of(
-                        stack-> VkPhysicalDeviceAccelerationStructureFeaturesKHR.calloc(stack)
+                        stack -> VkPhysicalDeviceAccelerationStructureFeaturesKHR.calloc(stack)
                                 .sType$Default(),
 
-                        stack-> VkPhysicalDeviceRayTracingPipelineFeaturesKHR.calloc(stack)
+                        stack -> VkPhysicalDeviceRayTracingPipelineFeaturesKHR.calloc(stack)
                                 .sType$Default(),
 
-                        stack-> VkPhysicalDeviceVulkan11Features.calloc(stack)
+                        stack -> VkPhysicalDeviceVulkan11Features.calloc(stack)
                                 .sType$Default(),
 
-                        stack-> VkPhysicalDeviceVulkan12Features.calloc(stack)
-                                .sType$Default()
-                ));
+                        stack -> VkPhysicalDeviceVulkan12Features.calloc(stack)
+                                .sType$Default()));
 
         return init.createContext();
     }

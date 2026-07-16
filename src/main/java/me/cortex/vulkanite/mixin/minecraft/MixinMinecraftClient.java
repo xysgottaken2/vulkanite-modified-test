@@ -1,21 +1,35 @@
 package me.cortex.vulkanite.mixin.minecraft;
 
 import me.cortex.vulkanite.client.Vulkanite;
-import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.Minecraft;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-@Mixin(MinecraftClient.class)
+@Mixin(Minecraft.class)
 public class MixinMinecraftClient {
-    @Inject(method = "render", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/render/GameRenderer;render(FJZ)V", shift = At.Shift.BEFORE))
-    private void onRenderTick(boolean tick, CallbackInfo ci) {
+    @Unique
+    private static final Logger LOGGER = LoggerFactory.getLogger("Vulkanite/Minecraft");
+    @Unique
+    private static int frameCount;
+
+    @Inject(method = "renderFrame", at = @At("HEAD"))
+    private void onRenderFrameStart(boolean tick, CallbackInfo ci) {
         Vulkanite.INSTANCE.renderTick();
     }
 
-    @Inject(method = "render", at = @At(value = "TAIL"))
-    private void tickFences(boolean tick, CallbackInfo ci) {
+    @Inject(method = "renderFrame", at = @At("TAIL"))
+    private void onRenderFrameEnd(boolean tick, CallbackInfo ci) {
         Vulkanite.INSTANCE.fenceTick();
+    }
+
+    @Inject(method = "close", at = @At("HEAD"))
+    private void onClose(CallbackInfo ci) {
+        LOGGER.info("Minecraft closing — destroying Vulkanite");
+        Vulkanite.INSTANCE.destroy();
     }
 }

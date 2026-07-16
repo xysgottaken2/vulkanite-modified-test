@@ -9,11 +9,12 @@ import me.cortex.vulkanite.client.Vulkanite;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.util.vma.VmaAllocationCreateInfo;
 import org.lwjgl.vulkan.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.util.HashMap;
-import java.util.function.Function;
 
 import static me.cortex.vulkanite.lib.other.VUtil._CHECK_;
 import static me.cortex.vulkanite.lib.other.VUtil._CHECK_GL_ERROR_;
@@ -23,7 +24,6 @@ import static org.lwjgl.opengl.EXTMemoryObjectFD.GL_HANDLE_TYPE_OPAQUE_FD_EXT;
 import static org.lwjgl.opengl.EXTMemoryObjectFD.glImportMemoryFdEXT;
 import static org.lwjgl.opengl.EXTMemoryObjectWin32.glImportMemoryWin32HandleEXT;
 import static org.lwjgl.opengl.EXTMemoryObjectWin32.GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT;
-import static org.lwjgl.opengl.EXTSemaphoreWin32.GL_HANDLE_TYPE_OPAQUE_WIN32_EXT;
 import static org.lwjgl.opengl.GL11C.*;
 import static org.lwjgl.opengl.GL12.GL_TEXTURE_3D;
 import static org.lwjgl.opengl.GL12.GL_TEXTURE_WRAP_R;
@@ -35,14 +35,16 @@ import static org.lwjgl.vulkan.KHRExternalMemoryFd.vkGetMemoryFdKHR;
 import static org.lwjgl.vulkan.KHRExternalMemoryWin32.vkGetMemoryWin32HandleKHR;
 import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.VK11.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-import static org.lwjgl.vulkan.VK11.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 import static org.lwjgl.vulkan.VK11.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT;
 
 public class MemoryManager {
-    private static final int EXTERNAL_MEMORY_HANDLE_TYPE = Vulkanite.IS_WINDOWS?VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT:VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    private static final int EXTERNAL_MEMORY_HANDLE_TYPE = Vulkanite.IS_WINDOWS
+            ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+            : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
     private final VkDevice device;
     private final VmaAllocator allocator;
     private final boolean hasDeviceAddresses;
+    private static final Logger LOGGER = LoggerFactory.getLogger("Vulkanite/MemoryManager");
 
     private static final long sharedBlockSize = 64L << 20L; // 64 MB
 
@@ -55,6 +57,7 @@ public class MemoryManager {
     public class ExternalMemoryTracker {
         public record HandleDescriptor(long handle, int glMemoryObj) {
         }
+
         public record HandleDescriptorTracked(HandleDescriptor desc, int refCount) {
         }
 
@@ -130,18 +133,31 @@ public class MemoryManager {
                     throw new IllegalStateException();
                 }
                 if (tracked.refCount == 1) {
+                    // Log actual GL error before delete to help diagnose 1282 source
+                    int errBefore = org.lwjgl.opengl.GL11C.glGetError();
+                    if (errBefore != org.lwjgl.opengl.GL11C.GL_NO_ERROR) {
+                        LOGGER.warn("glDeleteMemoryObjectsEXT: stale GL error 0x{} BEFORE delete (vkMemory=0x{})",
+                                Integer.toHexString(errBefore), Long.toHexString(memory));
+                    }
+                    org.lwjgl.opengl.GL11C.glFlush();
                     glDeleteMemoryObjectsEXT(tracked.desc.glMemoryObj);
-                    _CHECK_GL_ERROR_();
+                    int errAfter = org.lwjgl.opengl.GL11C.glGetError();
+                    if (errAfter != org.lwjgl.opengl.GL11C.GL_NO_ERROR) {
+                        LOGGER.error("glDeleteMemoryObjectsEXT FAILED with GL error 0x{} (glMemoryObj={}, vkMemory=0x{})",
+                                Integer.toHexString(errAfter), tracked.desc.glMemoryObj, Long.toHexString(memory));
+                    }
                     if (Vulkanite.IS_WINDOWS) {
-                        // if (!Kernel32.INSTANCE.CloseHandle(new WinNT.HANDLE(new Pointer(tracked.desc.handle)))) {
-                        //     int error = Kernel32.INSTANCE.GetLastError();
-                        //     System.err.println("STATE MIGHT BE BROKEN! Failed to close handle: " + error);
-                        //     throw new IllegalStateException();
+                        // if (!Kernel32.INSTANCE.CloseHandle(new WinNT.HANDLE(new
+                        // Pointer(tracked.desc.handle)))) {
+                        // int error = Kernel32.INSTANCE.GetLastError();
+                        // System.err.println("STATE MIGHT BE BROKEN! Failed to close handle: " +
+                        // error);
+                        // throw new IllegalStateException();
                         // }
                     } else {
                         int code = 0;
                         if ((code = LibC.INSTANCE.close((int) tracked.desc.handle)) != 0) {
-                            System.err.println("STATE MIGHT BE BROKEN! Failed to close FD: " + code);
+                            LOGGER.error("STATE MIGHT BE BROKEN! Failed to close FD: " + code);
                             throw new IllegalStateException();
                         }
                     }
@@ -156,34 +172,39 @@ public class MemoryManager {
     public VGBuffer createSharedBuffer(long size, int usage, int properties) {
         try (var stack = stackPush()) {
             var bufferCreateInfo = VkBufferCreateInfo
-                            .calloc(stack)
+                    .calloc(stack)
+                    .sType$Default()
+                    .size(size)
+                    .usage(usage)
+                    .pNext(VkExternalMemoryBufferCreateInfo.calloc(stack)
                             .sType$Default()
-                            .size(size)
-                            .usage(usage)
-                            .pNext(VkExternalMemoryBufferCreateInfo.calloc(stack)
-                                    .sType$Default()
-                                    .handleTypes(EXTERNAL_MEMORY_HANDLE_TYPE));
+                            .handleTypes(EXTERNAL_MEMORY_HANDLE_TYPE));
 
             var allocationCreateInfo = VmaAllocationCreateInfo.calloc(stack)
-                            .requiredFlags(properties);
-            
+                    .requiredFlags(properties);
+
             var alloc = allocator.allocShared(bufferCreateInfo, allocationCreateInfo);
 
             int memoryObject = ExternalMemoryTracker.acquire(alloc, device, alloc.isDedicated());
 
             int glId = glCreateBuffers();
             glNamedBufferStorageMemEXT(glId, size, memoryObject, alloc.ai.offset());
-            _CHECK_GL_ERROR_();
+            int bufErr = glGetError();
+            if (bufErr != GL_NO_ERROR) {
+                LOGGER.error("createSharedBuffer: glNamedBufferStorageMemEXT produced GL error 0x{} (size={} glId={})",
+                        Integer.toHexString(bufErr), size, glId);
+            }
             return new VGBuffer(alloc, glId);
         }
     }
 
-    public VGImage createSharedImage(int width, int height, int depth, int mipLevels, int vkFormat, int glFormat, int usage, int properties) {
+    public VGImage createSharedImage(int width, int height, int depth, int mipLevels, int vkFormat, int glFormat,
+            int usage, int properties) {
 
         int vkImageType = VK_IMAGE_TYPE_2D;
         int glImageType = GL_TEXTURE_2D;
 
-        if(height == 1 && depth == 1) {
+        if (height == 1 && depth == 1) {
             vkImageType = VK_IMAGE_TYPE_1D;
             glImageType = GL_TEXTURE_1D;
         } else if (height != 1 && depth != 1) {
@@ -210,7 +231,7 @@ public class MemoryManager {
             createInfo.extent().width(width).height(height).depth(depth);
 
             var allocInfo = VmaAllocationCreateInfo.calloc(stack)
-                            .requiredFlags(properties);
+                    .requiredFlags(properties);
 
             var alloc = allocator.allocShared(createInfo, allocInfo);
 
@@ -218,7 +239,7 @@ public class MemoryManager {
 
             int glId = glCreateTextures(glImageType);
 
-            switch(glImageType) {
+            switch (glImageType) {
                 case GL_TEXTURE_1D:
                     glTextureStorageMem1DEXT(glId, mipLevels, glFormat, width, memoryObject, alloc.ai.offset());
                     glTextureParameteri(glId, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -233,7 +254,8 @@ public class MemoryManager {
                     glTextureParameteri(glId, GL_TEXTURE_WRAP_T, GL_REPEAT);
                     break;
                 case GL_TEXTURE_3D:
-                    glTextureStorageMem3DEXT(glId, mipLevels, glFormat, width, height, depth, memoryObject, alloc.ai.offset());
+                    glTextureStorageMem3DEXT(glId, mipLevels, glFormat, width, height, depth, memoryObject,
+                            alloc.ai.offset());
                     glTextureParameteri(glId, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                     glTextureParameteri(glId, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                     glTextureParameteri(glId, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -242,7 +264,11 @@ public class MemoryManager {
                     break;
             }
 
-            _CHECK_GL_ERROR_();
+            int createErr = glGetError();
+            if (createErr != GL_NO_ERROR) {
+                LOGGER.error("createSharedImage: glTextureStorageMem2DEXT produced GL error 0x{} ({}x{} glId={})",
+                        Integer.toHexString(createErr), width, height, glId);
+            }
             return new VGImage(alloc, width, height, depth, mipLevels, vkFormat, glFormat, glId);
         }
     }
@@ -254,10 +280,10 @@ public class MemoryManager {
     public VBuffer createBuffer(long size, int usage, int properties, long alignment, int vmaFlags) {
         try (var stack = stackPush()) {
             var alloc = allocator.alloc(0, VkBufferCreateInfo
-                            .calloc(stack)
-                            .sType$Default()
-                            .size(size)
-                            .usage(usage),
+                    .calloc(stack)
+                    .sType$Default()
+                    .size(size)
+                    .usage(usage),
                     VmaAllocationCreateInfo.calloc(stack)
                             .requiredFlags(properties),
                     alignment);
@@ -268,17 +294,17 @@ public class MemoryManager {
     public VImage createImage2D(int width, int height, int mipLevels, int vkFormat, int usage, int properties) {
         try (var stack = stackPush()) {
             var alloc = allocator.alloc(0, VkImageCreateInfo
-                .calloc(stack)
-                .sType$Default()
-                .format(vkFormat)
-                .imageType(VK_IMAGE_TYPE_2D)
-                .tiling(VK_IMAGE_TILING_OPTIMAL)
-                .samples(VK_SAMPLE_COUNT_1_BIT)
-                .initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
-                .arrayLayers(1)
-                .mipLevels(mipLevels)
-                .extent(e -> e.width(width).height(height).depth(1))
-                .usage(usage),
+                    .calloc(stack)
+                    .sType$Default()
+                    .format(vkFormat)
+                    .imageType(VK_IMAGE_TYPE_2D)
+                    .tiling(VK_IMAGE_TILING_OPTIMAL)
+                    .samples(VK_SAMPLE_COUNT_1_BIT)
+                    .initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
+                    .arrayLayers(1)
+                    .mipLevels(mipLevels)
+                    .extent(e -> e.width(width).height(height).depth(1))
+                    .usage(usage),
                     VmaAllocationCreateInfo.calloc(stack)
                             .usage(VMA_MEMORY_USAGE_AUTO)
                             .requiredFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
@@ -287,15 +313,16 @@ public class MemoryManager {
     }
 
     public VAccelerationStructure createAcceleration(long size, int alignment, int usage, int type) {
-        var buffer = createBuffer(size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, alignment, 0);
+        var buffer = createBuffer(size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | usage,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, alignment, 0);
         try (var stack = stackPush()) {
             LongBuffer pAccelerationStructure = stack.mallocLong(1);
             _CHECK_(vkCreateAccelerationStructureKHR(device, VkAccelerationStructureCreateInfoKHR
-                            .calloc(stack)
-                            .sType$Default()
-                            .type(type)
-                            .size(size)
-                            .buffer(buffer.buffer()), null, pAccelerationStructure),
+                    .calloc(stack)
+                    .sType$Default()
+                    .type(type)
+                    .size(size)
+                    .buffer(buffer.buffer()), null, pAccelerationStructure),
                     "Failed to create acceleration acceleration structure");
             return new VAccelerationStructure(device, pAccelerationStructure.get(0), buffer);
         }

@@ -3,46 +3,38 @@ package me.cortex.vulkanite.acceleration;
 import me.cortex.vulkanite.lib.base.VContext;
 import me.cortex.vulkanite.lib.descriptors.VDescriptorSetLayout;
 import me.cortex.vulkanite.lib.memory.VAccelerationStructure;
-import me.cortex.vulkanite.lib.memory.VBuffer;
 import me.cortex.vulkanite.lib.other.sync.VSemaphore;
-import me.jellysquid.mods.sodium.client.render.chunk.RenderSection;
-import me.jellysquid.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
+import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
+import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
 
-import java.util.LinkedList;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 public class AccelerationManager {
     private final VContext ctx;
-
-    private final AccelerationBlasBuilder blasBuilder;
-    private final ConcurrentLinkedDeque<AccelerationBlasBuilder.BLASBatchResult> blasResults = new ConcurrentLinkedDeque<>();
-
     private final AccelerationTLASManager tlasManager;
+    private final AccelerationBlasBuilder blasBuilder;
+    private final List<VSemaphore> syncs = new LinkedList<>();
+    // BLAS results queued by background worker thread, drained on render thread in updateTick()
+    private final ConcurrentLinkedDeque<AccelerationBlasBuilder.BLASBatchResult> pendingResults = new ConcurrentLinkedDeque<>();
 
     public AccelerationManager(VContext context, int blasBuildQueue) {
         this.ctx = context;
-        this.blasBuilder = new AccelerationBlasBuilder(context, blasBuildQueue, blasResults::add);
-        this.tlasManager = new AccelerationTLASManager(context, 0);//TODO: pick the main queue or something? (maybe can do the blasBuildQueue)
+        this.tlasManager = new AccelerationTLASManager(context, 0);
+        this.blasBuilder = new AccelerationBlasBuilder(context, blasBuildQueue, pendingResults::add);
     }
 
+    // Called from Sodium worker threads — safe because enqueue() does no Vulkan work
     public void chunkBuilds(List<ChunkBuildOutput> results) {
         blasBuilder.enqueue(results);
     }
 
-    private final List<VSemaphore> syncs = new LinkedList<>();
-
-    //This updates the tlas internal structure, DOES NOT INCLUDING BUILDING THE TLAS
+    // Called on render thread — drains BLAS results and updates TLAS data structures
     public void updateTick() {
-        if (!blasResults.isEmpty()) {//If there are results
-            //Atomicly collect the results from the queue
-            List<AccelerationBlasBuilder.BLASBuildResult> results = new LinkedList<>();
-            while (!blasResults.isEmpty()) {
-                var batch = blasResults.poll();
-                results.addAll(batch.results());
-                syncs.add(batch.semaphore());
-            }
-            tlasManager.updateSections(results);
+        while (!pendingResults.isEmpty()) {
+            var batch = pendingResults.poll();
+            tlasManager.updateSections(batch.results());
+            syncs.add(batch.semaphore());
         }
     }
 
@@ -56,16 +48,8 @@ public class AccelerationManager {
         tlasManager.removeSection(section);
     }
 
-    //Cleans up any loose things such as semaphores waiting to be synced etc
     public void cleanup() {
-        //TODO: FIXME: I DONT THINK THIS IS CORRECT OR WORKS, IM STILL LEAKING VRAM MEMORY OUT THE WAZOO WHEN f3+a reloading
-        ctx.cmd.waitQueueIdle(0);
-        ctx.cmd.waitQueueIdle(1);
-        try {
-            Thread.sleep(250L);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
+        blasBuilder.shutdown();
         ctx.cmd.waitQueueIdle(0);
         ctx.cmd.waitQueueIdle(1);
         syncs.forEach(VSemaphore::free);
@@ -73,11 +57,6 @@ public class AccelerationManager {
         tlasManager.cleanupTick();
     }
 
-    public long getGeometrySet() {
-        return tlasManager.getGeometrySet();
-    }
-
-    public VDescriptorSetLayout getGeometryLayout() {
-        return tlasManager.getGeometryLayout();
-    }
+    public long getGeometrySet() { return tlasManager.getGeometrySet(); }
+    public VDescriptorSetLayout getGeometryLayout() { return tlasManager.getGeometryLayout(); }
 }

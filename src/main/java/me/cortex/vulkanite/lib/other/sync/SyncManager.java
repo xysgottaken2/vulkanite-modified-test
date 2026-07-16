@@ -5,6 +5,8 @@ import me.cortex.vulkanite.lib.memory.HandleDescriptorManger;
 import me.cortex.vulkanite.lib.other.VUtil;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.vulkan.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
@@ -35,6 +37,7 @@ import static org.lwjgl.vulkan.VK11.VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN
 // use this to add a cleanup system for e.g. single use command buffers is a good example, the fences themselves
 // semaphores, scratch/temp buffers etc
 public class SyncManager {
+    private static final Logger LOGGER = LoggerFactory.getLogger("Vulkanite/SyncManager");
     private static final int EXTERNAL_SEMAPHORE_TYPE = Vulkanite.IS_WINDOWS?VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT:VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
     private final VkDevice device;
     private volatile boolean deviceLost = false;
@@ -81,11 +84,22 @@ public class SyncManager {
             HandleDescriptorManger.add(pb.get(0));
 
             int glSemaphore = glGenSemaphoresEXT();
+            // Log stale GL errors that precede semaphore import so we know
+            // which upstream operation is setting GL_INVALID_OPERATION (1282).
+            int stale;
+            while ((stale = glGetError()) != GL_NO_ERROR) {
+                LOGGER.warn("SyncManager: stale GL error 0x{} BEFORE glImportSemaphoreWin32HandleEXT",
+                        Integer.toHexString(stale));
+            }
             glImportSemaphoreWin32HandleEXT(glSemaphore, GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, pb.get(0));
             if (!glIsSemaphoreEXT(glSemaphore))
                 throw new IllegalStateException();
-            if (glGetError() != GL_NO_ERROR)
+            int importErr = glGetError();
+            if (importErr != GL_NO_ERROR) {
+                LOGGER.error("SyncManager: glImportSemaphoreWin32HandleEXT produced GL error 0x{}",
+                        Integer.toHexString(importErr));
                 throw new IllegalStateException();
+            }
 
             return new VGSemaphore(device, semaphore, glSemaphore, pb.get(0));
         }
@@ -166,10 +180,16 @@ public class SyncManager {
                     // Device lost or other error: log and remove the fence without
                     // running the callback, since resources may be in an invalid state
                     if (status == VK_ERROR_DEVICE_LOST) {
+                        // Only log the stack trace once - deviceLost is sticky and every
+                        // remaining fence would otherwise re-print it on every render tick
+                        if (!deviceLost) {
+                            LOGGER.error("Device lost at vkGetFenceStatus, thread={}",
+                                    Thread.currentThread().getName(), new Exception("Device lost stack"));
+                        }
                         deviceLost = true;
                     }
-                    System.err.println("Warning: vkGetFenceStatus returned " + status
-                            + " (" + VUtil.translateVulkanResult(status) + "), removing fence without callback");
+                    LOGGER.warn("vkGetFenceStatus returned {} ({}), removing fence without callback",
+                            status, VUtil.translateVulkanResult(status));
                     toRemove.add(cb.getKey());
                 }
             }

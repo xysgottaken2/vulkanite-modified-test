@@ -1,12 +1,14 @@
 package me.cortex.vulkanite.lib.cmd;
 
-import com.mojang.blaze3d.systems.RenderSystem;
+import me.cortex.vulkanite.lib.other.VUtil;
 import me.cortex.vulkanite.lib.other.sync.VFence;
 import me.cortex.vulkanite.lib.other.sync.VSemaphore;
 import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkQueue;
 import org.lwjgl.vulkan.VkSubmitInfo;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.LongBuffer;
 
@@ -15,8 +17,10 @@ import static org.lwjgl.vulkan.VK10.*;
 
 //Manages multiple command queues and fence synchronizations
 public class CommandManager {
+    private static final Logger LOGGER = LoggerFactory.getLogger("Vulkanite/CommandManager");
     private final VkDevice device;
     private final VkQueue[] queues;
+    private volatile int submitCount;
 
     public CommandManager(VkDevice device, int queues) {
         this.device = device;
@@ -25,10 +29,11 @@ public class CommandManager {
             var pQ = stack.pointers(0);
             for (int i = 0; i < queues; i++) {
                 vkGetDeviceQueue(device, 0, i, pQ);
-                System.out.println("Queue "+i+" has address " + Long.toHexString(pQ.get(0)));
+                LOGGER.debug("Queue {} has address {}", i, Long.toHexString(pQ.get(0)));
                 this.queues[i] = new VkQueue(pQ.get(0), device);
             }
         }
+        LOGGER.info("CommandManager initialized with {} queues", queues);
     }
 
     public VCommandPool createSingleUsePool() {
@@ -59,11 +64,11 @@ public class CommandManager {
     }
 
     //TODO: if its a single use command buffer, automatically add the required fences and stuff to free the command buffer once its done
-    public void submit(int queueId, VCmdBuff[] cmdBuffs, VSemaphore[] waits, int[] waitStages, VSemaphore[] triggers, VFence fence) {
-        if (queueId == 0) {
-            RenderSystem.assertOnRenderThread();
-        }
+    private final Object submitLock = new Object();
 
+    public void submit(int queueId, VCmdBuff[] cmdBuffs, VSemaphore[] waits, int[] waitStages, VSemaphore[] triggers, VFence fence) {
+        int id = ++submitCount;
+        synchronized (submitLock) {
         try (var stack = stackPush()) {
             LongBuffer waitSemaphores = stack.mallocLong(waits.length);
             LongBuffer signalSemaphores = stack.mallocLong(triggers.length);
@@ -77,7 +82,12 @@ public class CommandManager {
                     .waitSemaphoreCount(waits.length)
                     .pWaitDstStageMask(stack.ints(waitStages))
                     .pSignalSemaphores(signalSemaphores);
-            vkQueueSubmit(queues[queueId], submit, fence==null?0:fence.address());
+            int result = vkQueueSubmit(queues[queueId], submit, fence==null?0:fence.address());
+            if (result != 0) {
+                LOGGER.error("submit#{} queue={} thread={} cmds={} FAILED: {}", id, queueId,
+                        Thread.currentThread().getName(), cmdBuffs.length, VUtil.translateVulkanResult(result));
+            }
+        }
         }
     }
 

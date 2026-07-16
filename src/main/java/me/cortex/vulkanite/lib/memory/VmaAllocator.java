@@ -6,22 +6,17 @@ import me.cortex.vulkanite.lib.other.VUtil;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
-import org.lwjgl.system.Struct;
 import org.lwjgl.util.vma.*;
 import org.lwjgl.vulkan.*;
 
-import java.lang.ref.Cleaner;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 
 import static me.cortex.vulkanite.lib.other.VUtil._CHECK_;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.util.vma.Vma.*;
 import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.VK12.*;
-import static org.lwjgl.vulkan.VK11.VK_API_VERSION_1_1;
 
 public class VmaAllocator {
     private final VkDevice device;

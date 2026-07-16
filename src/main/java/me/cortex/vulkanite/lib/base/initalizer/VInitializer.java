@@ -2,10 +2,13 @@ package me.cortex.vulkanite.lib.base.initalizer;
 
 import me.cortex.vulkanite.lib.base.VContext;
 import org.lwjgl.PointerBuffer;
+import org.lwjgl.opengl.GL11C;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.system.Struct;
 import org.lwjgl.vulkan.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -26,6 +29,8 @@ public class VInitializer {
     private VkPhysicalDevice physicalDevice;
     private VkDevice device;
     private int queueCount;
+    private Logger LOGGER = LoggerFactory.getLogger("Vulkanite/VInitializer");
+
     public VInitializer(String appName, String engineName, int major, int minor, String[] extensions, String[] layers) {
         try (MemoryStack stack = stackPush()) {
             VkApplicationInfo appInfo = VkApplicationInfo.calloc(stack)
@@ -37,8 +42,10 @@ public class VInitializer {
             VkInstanceCreateInfo instanceCreateInfo = VkInstanceCreateInfo.calloc(stack)
                     .sType$Default()
                     .pApplicationInfo(appInfo)
-                    .ppEnabledExtensionNames(stack.pointers(Arrays.stream(extensions).map(stack::UTF8).toArray(ByteBuffer[]::new)))
-                    .ppEnabledLayerNames(stack.pointers(Arrays.stream(layers).map(stack::UTF8).toArray(ByteBuffer[]::new)));
+                    .ppEnabledExtensionNames(
+                            stack.pointers(Arrays.stream(extensions).map(stack::UTF8).toArray(ByteBuffer[]::new)))
+                    .ppEnabledLayerNames(
+                            stack.pointers(Arrays.stream(layers).map(stack::UTF8).toArray(ByteBuffer[]::new)));
 
             PointerBuffer result = stack.pointers(0);
             _CHECK_(vkCreateInstance(instanceCreateInfo, null, result));
@@ -48,20 +55,34 @@ public class VInitializer {
     }
 
     public void findPhysicalDevice() {
+        String glRenderer = GL11C.glGetString(GL11C.GL_RENDERER);
+        LOGGER.info("OpenGL Renderer: " + glRenderer);
         try (MemoryStack stack = stackPush()) {
             PointerBuffer devices = getPhysicalDevices(stack);
+            VkPhysicalDevice firstDevice = null;
             for (int i = 0; i < devices.capacity(); i++) {
                 VkPhysicalDeviceProperties props = VkPhysicalDeviceProperties.calloc(stack);
                 vkGetPhysicalDeviceProperties(new VkPhysicalDevice(devices.get(i), instance), props);
-                System.out.println(props.deviceNameString());
-                physicalDevice = new VkPhysicalDevice(devices.get(i), instance);
-                break;
+                String deviceName = props.deviceNameString();
+                LOGGER.info("Vulkan Device " + i + ": " + deviceName);
+                if (firstDevice == null)
+                    firstDevice = new VkPhysicalDevice(devices.get(i), instance);
+                // Match Vulkan device to OpenGL renderer
+                if (glRenderer != null && deviceName != null && glRenderer.contains(deviceName.split("/")[0].trim())) {
+                    physicalDevice = new VkPhysicalDevice(devices.get(i), instance);
+                    LOGGER.info("Matched: " + deviceName);
+                    return;
+                }
             }
+            // Fallback to first device
+            physicalDevice = firstDevice;
+            LOGGER.info("No match found, using first GPU");
         }
     }
 
-    //TODO: add nice queue creation system
-    public void createDevice(List<String> extensions, List<String> layers, float[] queuePriorities, Consumer<VkPhysicalDeviceFeatures> deviceFeatures, List<Function<MemoryStack, Struct>> applicators) {
+    // TODO: add nice queue creation system
+    public void createDevice(List<String> extensions, List<String> layers, float[] queuePriorities,
+            Consumer<VkPhysicalDeviceFeatures> deviceFeatures, List<Function<MemoryStack, Struct>> applicators) {
         var deviceExtensions = new HashSet<>(getDeviceExtensionStrings(physicalDevice));
         for (var extension : extensions) {
             if (!deviceExtensions.contains(extension)) {
@@ -79,7 +100,8 @@ public class VInitializer {
 
             VkDeviceCreateInfo createInfo = VkDeviceCreateInfo.calloc(stack)
                     .sType$Default()
-                    .ppEnabledExtensionNames(stack.pointers(extensions.stream().map(stack::UTF8).toArray(ByteBuffer[]::new)))
+                    .ppEnabledExtensionNames(
+                            stack.pointers(extensions.stream().map(stack::UTF8).toArray(ByteBuffer[]::new)))
                     .ppEnabledLayerNames(stack.pointers(layers.stream().map(stack::UTF8).toArray(ByteBuffer[]::new)))
                     .pQueueCreateInfos(queueCreateInfos);
 
@@ -98,7 +120,7 @@ public class VInitializer {
                 deviceProperties2.pNext(feature.address());
                 vkGetPhysicalDeviceFeatures2(physicalDevice, deviceProperties2);
                 long next = feature.address();
-                MemoryUtil.memPutAddress(chain+8, next);
+                MemoryUtil.memPutAddress(chain + 8, next);
                 chain = next;
             }
 
@@ -170,7 +192,8 @@ public class VInitializer {
 
     private List<String> getDeviceExtensionStrings(VkPhysicalDevice device) {
         List<String> extensions = new ArrayList<>();
-        // Use heap allocation instead of stack to avoid stack overflow on systems with many extensions
+        // Use heap allocation instead of stack to avoid stack overflow on systems with
+        // many extensions
         try (var stack = stackPush()) {
             var eb = getDeviceExtensionsHeap(stack, device);
             for (var extension : eb) {
@@ -209,7 +232,7 @@ public class VInitializer {
     }
 
     public VContext createContext() {
-        //TODO:FIXME: DONT HARDCODE THE FACT IT HAS DEVICE ADDRESSES
+        // TODO:FIXME: DONT HARDCODE THE FACT IT HAS DEVICE ADDRESSES
         return new VContext(device, queueCount, true);
     }
 }

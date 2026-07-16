@@ -2,9 +2,14 @@ package me.cortex.vulkanite.lib.base;
 
 import java.lang.ref.Cleaner;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public abstract class TrackedResourceObject {
 
     private final Ref ref;
+    private static Logger LOGGER = LoggerFactory.getLogger(TrackedResourceObject.class.getName());
+
     public TrackedResourceObject() {
         this.ref = register(this);
     }
@@ -20,16 +25,18 @@ public abstract class TrackedResourceObject {
         return ref.freedRef[0];
     }
 
-    private record Ref(Cleaner.Cleanable cleanable, boolean[] freedRef) {}
+    private record Ref(Cleaner.Cleanable cleanable, boolean[] freedRef) {
+    }
 
     private static final Cleaner cleaner = Cleaner.create();
+
     public static Ref register(Object obj) {
         String clazz = obj.getClass().getName();
         Throwable trace = new Throwable();
         boolean[] freed = new boolean[1];
-        var clean = cleaner.register(obj, ()->{
+        var clean = cleaner.register(obj, () -> {
             if (!freed[0]) {
-                System.err.println("Object named: "+ clazz+" was not freed, location at: ");
+                LOGGER.warn("Object named: " + clazz + " was not freed, location at: ");
                 trace.printStackTrace();
             }
         });

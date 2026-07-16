@@ -1,7 +1,7 @@
 package me.cortex.vulkanite.acceleration;
 
 import me.cortex.vulkanite.lib.memory.VBuffer;
-import me.jellysquid.mods.sodium.client.render.chunk.RenderSection;
+import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 
 import java.util.List;
 

@@ -1,52 +1,30 @@
-```
-# Compiled and build artifacts
-*.class
-*.o
-*.obj
-*.out
-dist/
+# Gradle
+.gradle/
 build/
-target/
+!gradle/wrapper/gradle-wrapper.jar
 
-# Dependencies
-lib/
-deps/
-node_modules/
-__pycache__/
-.venv/
-venv/
-.env
-.env.local
-*.env.*
-
-# Logs and temp files
-*.log
-*.tmp
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
 *.swp
 *.swo
 
-# Editors
-.vscode/
-.idea/
-
-# System files
+# OS
 .DS_Store
 Thumbs.db
 
-# Coverage
-coverage/
-htmlcov/
-.coverage
+# Java
+*.class
+*.jar
+*.log
 
-# Gradle
-.gradle/
-
-# MyPy
-.mypy_cache/
-
-# PyTest
-.pytest_cache/
-```
-
-bin/
+# Minecraft
 run/
+
+# Mod development
+bin/
+
+temp/

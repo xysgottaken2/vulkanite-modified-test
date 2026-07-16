@@ -1,97 +1,119 @@
 package me.cortex.vulkanite.mixin.iris;
 
+import com.mojang.blaze3d.opengl.GlStateManager;
 import me.cortex.vulkanite.client.Vulkanite;
 import me.cortex.vulkanite.compat.IVGBuffer;
 import me.cortex.vulkanite.lib.memory.VGBuffer;
-import net.coderbot.iris.gl.IrisRenderSystem;
-import net.coderbot.iris.gl.buffer.ShaderStorageBuffer;
-import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
-import org.spongepowered.asm.mixin.Unique;
+import net.irisshaders.iris.gl.IrisRenderSystem;
+import net.irisshaders.iris.gl.buffer.BuiltShaderStorageInfo;
+import net.irisshaders.iris.gl.buffer.ShaderStorageBuffer;
+import org.lwjgl.opengl.GL43C;
+import org.lwjgl.system.MemoryUtil;
+import org.spongepowered.asm.mixin.*;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import static org.lwjgl.opengl.GL15C.glDeleteBuffers;
+import java.nio.ByteBuffer;
+import java.util.Optional;
+
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
 @Mixin(value = ShaderStorageBuffer.class, remap = false)
 public abstract class MixinShaderStorageBuffer implements IVGBuffer {
-    @Shadow
-    protected int id;
 
-    @Shadow
-    public abstract int getIndex();
+    @Shadow protected int index;
+    @Shadow protected BuiltShaderStorageInfo info;
+    @Shadow protected ByteBuffer content;
+    @Shadow protected int id;
 
-    @Unique
-    private VGBuffer vkBuffer;
+    @Shadow public abstract int getIndex();
 
-    public VGBuffer getBuffer() {
+    @Unique private Optional<VGBuffer> vkBuffer = Optional.empty();
+
+    // === IVGBuffer ===
+
+    public Optional<VGBuffer> getBuffer() {
         return vkBuffer;
     }
 
-    public void setBuffer(VGBuffer buffer) {
-        if (vkBuffer != null && buffer != null) {
-            throw new IllegalStateException("Override buffer not null");
-        }
-        this.vkBuffer = buffer;
-        if (buffer != null) {
-            glDeleteBuffers(id);
-            id = vkBuffer.glId;
-        }
+    // === Constructor: delete Iris's plain GL buffer ===
+
+    @Inject(method = "<init>", at = @At("TAIL"))
+    private void onConstructed(CallbackInfo ci) {
+        // Iris created a plain GL buffer via createBuffers(). Delete it.
+        // Real buffer storage is created on-demand in resizeIfRelative / createStatic.
+        IrisRenderSystem.deleteBuffers(this.id);
+        this.id = 0;
     }
 
-    // =======================================================================
-    // hook the adaptive resize method to dynamically create and
-    // replace it with a Vulkan shared buffer
-    // =======================================================================
-    @Inject(method = "resizeIfRelative", at = @At("TAIL"))
-    private void onResizeIfRelative(int width, int height, CallbackInfo ci) {
-        // 1. Get the actual OpenGL buffer size allocated by Iris after resizing
-        //    based on the current window resolution
-        int[] sizeContainer = new int[1];
-        org.lwjgl.opengl.GL15C.glBindBuffer(org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER, this.id);
-        org.lwjgl.opengl.GL15C.glGetBufferParameteriv(org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER,
-                org.lwjgl.opengl.GL15C.GL_BUFFER_SIZE, sizeContainer);
-        int allocatedSize = sizeContainer[0];
+    // === Overwrite resizeIfRelative ===
 
-        if (allocatedSize > 0) {
-            // 2. When the window is resized, safely destroy and free the old GPU
-            //    memory if a VGBuffer already exists to prevent leaks
-            if (this.vkBuffer != null) {
-                VGBuffer oldBuffer = this.vkBuffer;
-                Vulkanite.INSTANCE.addSyncedCallback(oldBuffer::free);
-                this.vkBuffer = null;
-            }
+    @Overwrite
+    public void resizeIfRelative(int width, int height) {
+        if (!info.relative()) return;
 
-            // 3. Dynamically create a Vulkan VGBuffer shared buffer that exactly
-            //    matches the required size
-            VGBuffer newVkBuffer = Vulkanite.INSTANCE.getCtx().memory.createSharedBuffer(
-                    allocatedSize,
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-            // 4. Destroy the OpenGL buffer just created by Iris and physically
-            //    replace it with shared memory
-            glDeleteBuffers(this.id);
-            this.vkBuffer = newVkBuffer;
-            this.id = newVkBuffer.glId;
-
-            // 5. Bind it to the corresponding base SSBO binding point so the
-            //    Vulkan and OpenGL paths remain bridged
-            org.lwjgl.opengl.GL30C.glBindBufferBase(org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER, this.getIndex(),
-                    this.id);
+        // Free old VGBuffer if present
+        if (vkBuffer.isPresent()) {
+            VGBuffer old = vkBuffer.get();
+            Vulkanite.INSTANCE.addSyncedCallback(old::free);
+            vkBuffer = Optional.empty();
         }
+
+        long newWidth = (long) (width * info.scaleX());
+        long newHeight = (long) (height * info.scaleY());
+        long finalSize = (newHeight * newWidth) * info.size();
+
+        VGBuffer buf = Vulkanite.INSTANCE.getCtx().memory.createSharedBuffer(
+                finalSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkBuffer = Optional.of(buf);
+        this.id = buf.glId;
+        IrisRenderSystem.bindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, index, this.id);
     }
 
-    @Redirect(method = "destroy", at = @At(value = "INVOKE", target = "Lnet/coderbot/iris/gl/IrisRenderSystem;deleteBuffers(I)V"))
-    private void redirectDelete(int id) {
-        if (vkBuffer != null) {
-            Vulkanite.INSTANCE.addSyncedCallback(vkBuffer::free);
-        } else {
-            IrisRenderSystem.deleteBuffers(id);
+    // === Overwrite createStatic ===
+
+    @Overwrite
+    public void createStatic() {
+        // Free old VGBuffer if replacing
+        if (vkBuffer.isPresent()) {
+            VGBuffer old = vkBuffer.get();
+            Vulkanite.INSTANCE.addSyncedCallback(old::free);
+            vkBuffer = Optional.empty();
         }
+
+        VGBuffer buf = Vulkanite.INSTANCE.getCtx().memory.createSharedBuffer(
+                info.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkBuffer = Optional.of(buf);
+        this.id = buf.glId;
+
+        // Upload initial content if present
+        if (content != null) {
+            GlStateManager._glBindBuffer(GL43C.GL_SHADER_STORAGE_BUFFER, this.id);
+            GlStateManager._glBufferSubData(GL43C.GL_SHADER_STORAGE_BUFFER, 0, content);
+        }
+
+        IrisRenderSystem.bindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, index, this.id);
+    }
+
+    // === Overwrite bind ===
+
+    @Overwrite
+    public void bind() {
+        IrisRenderSystem.bindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, index, id);
+    }
+
+    // === Overwrite destroy ===
+
+    @Overwrite
+    protected void destroy() {
+        IrisRenderSystem.bindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, index, 0);
+        if (vkBuffer.isPresent()) {
+            VGBuffer captured = vkBuffer.get();
+            vkBuffer = Optional.empty();
+            Vulkanite.INSTANCE.addSyncedCallback(captured::free);
+        }
+        MemoryUtil.memFree(content);
     }
 }

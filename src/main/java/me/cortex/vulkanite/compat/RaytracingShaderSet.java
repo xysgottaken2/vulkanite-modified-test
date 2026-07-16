@@ -12,6 +12,8 @@ import static org.lwjgl.vulkan.KHRRayTracingPipeline.*;
 
 public class RaytracingShaderSet {
     public final int maxDepth = 1;
+    public final float dispatchW, dispatchH, dispatchD;
+    public final int group;
 
     private record RayHit(ShaderModule close, ShaderModule any, ShaderModule intersection) {}
     private final ShaderModule raygen;
@@ -21,6 +23,10 @@ public class RaytracingShaderSet {
     private final VShader[] allShader;
 
     public RaytracingShaderSet(VContext ctx, RaytracingShaderSource source) {
+        this.dispatchW = source.dispatchW;
+        this.dispatchH = source.dispatchH;
+        this.dispatchD = source.dispatchD;
+        this.group = source.group;
         List<VShader> shaderList = new ArrayList<>();
 
         VShader shader = VShader.compileLoad(ctx, source.raygen, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
