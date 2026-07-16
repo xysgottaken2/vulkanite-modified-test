@@ -1,6 +1,6 @@
 # Vulkanite for 26.2
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-LGPL--3.0-blue.svg)](LICENSE)
 [![Minecraft](https://img.shields.io/badge/Minecraft-26.2-brightgreen.svg)](https://minecraft.net)
 [![Java](https://img.shields.io/badge/Java-25-orange.svg)](https://adoptium.net)
 
