@@ -9,11 +9,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = ShaderPackSourceNames.class, remap = false)
 public class MixinShaderPackSourceNames {
+    private static final int MAX_RAYTRACING_PASSES = 16;
+
     @Inject(method = "findPotentialStarts", at = @At("RETURN"), cancellable = true)
     private static void injectRaytraceShaderNames(CallbackInfoReturnable<ImmutableList<String>> cir) {
         ImmutableList.Builder<String> builder = ImmutableList.builder();
         builder.addAll(cir.getReturnValue());
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < MAX_RAYTRACING_PASSES; i++) {
             builder.add("ray" + i + ".rgen");
             for (int j = 0; j < 4; j++) {
                 builder.add("ray" + i + "_" + j + ".rmiss");
