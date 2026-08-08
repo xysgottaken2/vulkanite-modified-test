@@ -12,6 +12,7 @@ public class VGImage extends VImage {
     public final int glId;
     public final int glFormat;
     private final long vkMemory;
+    private boolean ownsGlTexture = true;
 
     VGImage(VmaAllocator.ImageAllocation allocation, int width, int height, int depth, int mipLayers, int format, int glFormat, int glId) {
         super(allocation, width, height, depth, mipLayers, format);
@@ -20,7 +21,18 @@ public class VGImage extends VImage {
         this.vkMemory = allocation.ai.deviceMemory();
     }
 
-    public void free() {
+    /** The Minecraft GpuTexture wrapper will delete the OpenGL texture name. */
+    public void transferGlTextureOwnership() {
+        ownsGlTexture = false;
+    }
+
+    @Override
+    protected void freeAllocation() {
+        if (!ownsGlTexture) {
+            MemoryManager.ExternalMemoryTracker.release(this.vkMemory);
+            super.freeAllocation();
+            return;
+        }
         int errBefore = glGetError();
         if (errBefore != GL_NO_ERROR) {
             LOG.warn("VGImage.free: stale GL error 0x{} BEFORE glDeleteTextures(glId={})",
@@ -32,6 +44,6 @@ public class VGImage extends VImage {
             LOG.error("VGImage.free: glDeleteTextures(glId={}) produced GL error {:#x}", glId, errAfter);
         }
         MemoryManager.ExternalMemoryTracker.release(this.vkMemory);
-        super.free();
+        super.freeAllocation();
     }
 }

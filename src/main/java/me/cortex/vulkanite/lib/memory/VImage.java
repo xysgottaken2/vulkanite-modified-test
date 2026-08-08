@@ -11,6 +11,8 @@ public class VImage {
     public final int mipLayers;
     public final int format;
     public final int dimensions;
+    private int imageViewCount;
+    private boolean freeRequested;
     private static Logger LOGGER = LoggerFactory.getLogger(VImage.class.getName());
 
     VImage(VmaAllocator.ImageAllocation allocation, int width, int height, int depth, int mipLayers, int format) {
@@ -32,11 +34,35 @@ public class VImage {
         this.dimensions = dimensions;
     }
 
-    public void free() {
-        if (allocation == null) {
+    public synchronized void retainImageView() {
+        if (allocation == null || freeRequested) {
+            throw new IllegalStateException("Cannot create a view for an image pending destruction");
+        }
+        imageViewCount++;
+    }
+
+    public synchronized void releaseImageView() {
+        if (imageViewCount <= 0) {
+            throw new IllegalStateException("Image view reference count underflow");
+        }
+        imageViewCount--;
+        if (imageViewCount == 0 && freeRequested) {
+            freeAllocation();
+        }
+    }
+
+    public synchronized void free() {
+        if (allocation == null || freeRequested) {
             LOGGER.warn("Attempted to free VImage that was already freed");
             return;
         }
+        freeRequested = true;
+        if (imageViewCount == 0) {
+            freeAllocation();
+        }
+    }
+
+    protected void freeAllocation() {
         allocation.free();
         allocation = null;
     }

@@ -54,9 +54,10 @@ public abstract class MixinPBRAtlasTexture extends AbstractTexture {
             LOGGER.warn("Vulkanite is disabled, falling back to plain GL for PBR atlas");
             return device.createTexture(label, usage, format, width, height, depthOrLayers, mipLevels);
         }
+        VGImage vg = null;
         try {
             var ctx = Vulkanite.INSTANCE.getCtx();
-            VGImage vg = ctx.memory.createSharedImage(width, height, 1, mipLevels,
+            vg = ctx.memory.createSharedImage(width, height, 1, mipLevels,
                     VK_FORMAT_R8G8B8A8_UNORM, GL_RGBA8,
                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -92,11 +93,15 @@ public abstract class MixinPBRAtlasTexture extends AbstractTexture {
                     device, vg.glId, labelStr, usage, format, width, height, depthOrLayers, mipLevels)
                     .orElseThrow(() -> new RuntimeException("Failed to wrap shared texture for PBR atlas"));
 
+            vg.transferGlTextureOwnership();
             ((IVGImage) this).setVGImage(vg);
             LOGGER.info("PBR atlas {} {}x{} mips={} made Vulkan-shared (glId={})",
                     labelStr, width, height, mipLevels, vg.glId);
             return gpuTex;
         } catch (Exception e) {
+            if (vg != null) {
+                vg.free();
+            }
             LOGGER.error("Failed to make PBR atlas Vulkan-shared, falling back to plain GL", e);
             return device.createTexture(label, usage, format, width, height, depthOrLayers, mipLevels);
         }

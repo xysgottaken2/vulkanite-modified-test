@@ -1,21 +1,28 @@
 package me.cortex.vulkanite.compat;
 
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
+import net.caffeinemc.mods.sodium.client.render.chunk.terrain.DefaultTerrainRenderPasses;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
 import net.caffeinemc.mods.sodium.client.util.NativeBuffer;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 //TODO: FIXME! the native buffer is destroyed by the AccelerationBlasBuilder after its copied to the gpu, however
 // on world reload or for whatever reason that the result is destroyed (and not submitted to the blas builder)
 // must find a way to free the native buffers
 public class SodiumResultAdapter {
+    private static final float COPLANAR_CUTOUT_OFFSET = 1.0f / 64.0f;
+
     public static void compute(ChunkBuildOutput buildResult) {
         var ebr = (IAccelerationBuildResult) buildResult;
         int stride = ebr.getVertexFormat().getVertexFormat().getVertexSize();
+        Set<QuadPositionKey> solidQuadPositions = collectSolidQuadPositions(buildResult, stride);
 
         Map<TerrainRenderPass, GeometryData> blasMap = new HashMap<>();
         Map<TerrainRenderPass, NativeBuffer> geomBuffersMap = new HashMap<>();
@@ -51,10 +58,13 @@ public class SodiumResultAdapter {
 
                 int segQuadCount = segVertexCount / 4;
                 for (int q = 0; q < segQuadCount; q++) {
+                    int startVertex = vertexStart + q * 4;
                     long quadOffset = (long) quadIdx * 40 * 4;
-                    encodeQuad(srcVert, stride, vertexStart + q * 4,
+                    boolean offsetCoplanarCutout = pass.getKey() == DefaultTerrainRenderPasses.CUTOUT
+                            && solidQuadPositions.contains(quadPositionKey(srcVert, stride, startVertex));
+                    encodeQuad(srcVert, stride, startVertex,
                             blasAddr, (long) quadIdx * 4 * 8,
-                            geomBuf, quadOffset);
+                            geomBuf, quadOffset, offsetCoplanarCutout);
                     quadIdx++;
                 }
                 vertexStart += segVertexCount;
@@ -71,6 +81,34 @@ public class SodiumResultAdapter {
             ebr.setAccelerationGeometryData(null);
             ebr.setGeometryBuffersData(null);
         }
+    }
+
+    private static Set<QuadPositionKey> collectSolidQuadPositions(ChunkBuildOutput buildResult, int stride) {
+        var solidMesh = buildResult.meshes.get(DefaultTerrainRenderPasses.SOLID);
+        if (solidMesh == null) {
+            return Set.of();
+        }
+
+        var vertexData = solidMesh.getVertexData();
+        int vertexCount = vertexData.getLength() / stride;
+        long srcVert = MemoryUtil.memAddress(vertexData.getDirectBuffer());
+        Set<QuadPositionKey> positions = new HashSet<>(vertexCount / 4);
+        for (int vertex = 0; vertex + 3 < vertexCount; vertex += 4) {
+            positions.add(quadPositionKey(srcVert, stride, vertex));
+        }
+        return positions;
+    }
+
+    private static QuadPositionKey quadPositionKey(long srcVertBase, int stride, int startVertex) {
+        long[] positions = new long[4];
+        for (int i = 0; i < positions.length; i++) {
+            positions[i] = unpackPosition20(srcVertBase, startVertex + i, stride);
+        }
+        Arrays.sort(positions);
+        return new QuadPositionKey(positions[0], positions[1], positions[2], positions[3]);
+    }
+
+    private record QuadPositionKey(long a, long b, long c, long d) {
     }
 
     // ---- 20-bit packed position decode (CompactChunkVertex / Iris XHFP 1.11.2) ----
@@ -166,7 +204,8 @@ public class SodiumResultAdapter {
 
     private static void encodeQuad(long srcVertBase, int stride, int startVertex,
                                    long blasAddr, long blasQuadOffset,
-                                   ByteBuffer geomBuf, long geomQuadOffset) {
+                                   ByteBuffer geomBuf, long geomQuadOffset,
+                                   boolean offsetCoplanarCutout) {
 
         // Position, color, texture for all 4 vertices, plus compute normal from geometry
         float[] px = new float[4], py = new float[4], pz = new float[4];
@@ -240,9 +279,20 @@ public class SodiumResultAdapter {
         for (int i = 0; i < 4; i++) {
             // ---- BLAS buffer: half-float position (8 bytes/vertex) ----
             long blasVertOff = blasQuadOffset + (long) i * 8;
-            MemoryUtil.memPutShort(blasAddr + blasVertOff, (short) fromFloat(px[i]));
-            MemoryUtil.memPutShort(blasAddr + blasVertOff + 2, (short) fromFloat(py[i]));
-            MemoryUtil.memPutShort(blasAddr + blasVertOff + 4, (short) fromFloat(pz[i]));
+            float blasX = px[i];
+            float blasY = py[i];
+            float blasZ = pz[i];
+            if (offsetCoplanarCutout) {
+                // Layered block models (notably grass sides) use a tinted cutout quad
+                // exactly on top of a solid quad. Give the overlay a stable nearest hit;
+                // transparent texels still fall through in the any-hit shader.
+                blasX += normX * COPLANAR_CUTOUT_OFFSET;
+                blasY += normY * COPLANAR_CUTOUT_OFFSET;
+                blasZ += normZ * COPLANAR_CUTOUT_OFFSET;
+            }
+            MemoryUtil.memPutShort(blasAddr + blasVertOff, (short) fromFloat(blasX));
+            MemoryUtil.memPutShort(blasAddr + blasVertOff + 2, (short) fromFloat(blasY));
+            MemoryUtil.memPutShort(blasAddr + blasVertOff + 4, (short) fromFloat(blasZ));
             MemoryUtil.memPutShort(blasAddr + blasVertOff + 6, (short) 0); // padding W
 
             // ---- 40-byte geometry buffer ----

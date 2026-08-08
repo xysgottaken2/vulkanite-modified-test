@@ -16,12 +16,9 @@ public class SharedImageViewTracker {
         this.ctx = ctx;
     }
 
-    //NOTE: getting the image doesnt invalidate/check for a different image
     public VImage getImage() {
-        if (view != null) {
-            return view.image;
-        }
-        return null;
+        VImageView currentView = getView();
+        return currentView != null ? currentView.image : null;
     }
 
     public VImageView getView() {

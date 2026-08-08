@@ -36,14 +36,19 @@ public class VImageView extends TrackedResourceObject {
             vci.subresourceRange()
                     .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
                     .layerCount(1)
-                    .levelCount(1);
+                    .levelCount(image.mipLayers);
             _CHECK_(vkCreateImageView(ctx.device, vci, null, view));
             this.view = view.get(0);
+            image.retainImageView();
         }
     }
 
     public void free() {
+        if (isFreed()) {
+            return;
+        }
         free0();
         vkDestroyImageView(ctx.device, view, null);
+        image.releaseImageView();
     }
 }

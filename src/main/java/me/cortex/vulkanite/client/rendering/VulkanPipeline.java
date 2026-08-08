@@ -237,7 +237,8 @@ public class VulkanPipeline {
                 .newLayout(targetLayout)
                 .srcAccessMask(0)
                 .dstAccessMask(targetAccess)
-                .subresourceRange(e -> e.levelCount(1).layerCount(1).aspectMask(VK_IMAGE_ASPECT_COLOR_BIT));
+                .subresourceRange(e -> e.levelCount(image.mipLayers).layerCount(1)
+                        .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT));
     }
 
     private VImage getPbrAtlas(AbstractTexture atlas,
@@ -270,7 +271,8 @@ public class VulkanPipeline {
                 .addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
                 .addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
                 .compareOp(VK_COMPARE_OP_NEVER)
-                .maxLod(1)
+                .minLod(0.0f)
+                .maxLod(VK_LOD_CLAMP_NONE)
                 .borderColor(VK_BORDER_COLOR_INT_OPAQUE_BLACK)
                 .maxAnisotropy(anisotropy));
     }
