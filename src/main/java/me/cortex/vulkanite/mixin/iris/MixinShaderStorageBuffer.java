@@ -3,6 +3,7 @@ package me.cortex.vulkanite.mixin.iris;
 import com.mojang.blaze3d.opengl.GlStateManager;
 import me.cortex.vulkanite.client.Vulkanite;
 import me.cortex.vulkanite.compat.IVGBuffer;
+import me.cortex.vulkanite.compat.RaytracingPackState;
 import me.cortex.vulkanite.lib.memory.VGBuffer;
 import net.irisshaders.iris.gl.IrisRenderSystem;
 import net.irisshaders.iris.gl.buffer.BuiltShaderStorageInfo;
@@ -31,6 +32,7 @@ public abstract class MixinShaderStorageBuffer implements IVGBuffer {
     @Shadow public abstract int getIndex();
 
     @Unique private Optional<VGBuffer> vkBuffer = Optional.empty();
+    @Unique private boolean vulkanite$shared;
 
     // === IVGBuffer ===
 
@@ -42,16 +44,21 @@ public abstract class MixinShaderStorageBuffer implements IVGBuffer {
 
     @Inject(method = "<init>", at = @At("TAIL"))
     private void onConstructed(CallbackInfo ci) {
+        if (!RaytracingPackState.isActive()) {
+            return;
+        }
         // Iris created a plain GL buffer via createBuffers(). Delete it.
         // Real buffer storage is created on-demand in resizeIfRelative / createStatic.
         IrisRenderSystem.deleteBuffers(this.id);
         this.id = 0;
+        vulkanite$shared = true;
     }
 
-    // === Overwrite resizeIfRelative ===
-
-    @Overwrite
-    public void resizeIfRelative(int width, int height) {
+    @Inject(method = "resizeIfRelative", at = @At("HEAD"), cancellable = true)
+    private void vulkanite$resizeIfRelative(int width, int height, CallbackInfo ci) {
+        if (!vulkanite$shared) {
+            return;
+        }
         if (!info.relative()) return;
 
         // Free old VGBuffer if present
@@ -70,12 +77,14 @@ public abstract class MixinShaderStorageBuffer implements IVGBuffer {
         vkBuffer = Optional.of(buf);
         this.id = buf.glId;
         IrisRenderSystem.bindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, index, this.id);
+        ci.cancel();
     }
 
-    // === Overwrite createStatic ===
-
-    @Overwrite
-    public void createStatic() {
+    @Inject(method = "createStatic", at = @At("HEAD"), cancellable = true)
+    private void vulkanite$createStatic(CallbackInfo ci) {
+        if (!vulkanite$shared) {
+            return;
+        }
         // Free old VGBuffer if replacing
         if (vkBuffer.isPresent()) {
             VGBuffer old = vkBuffer.get();
@@ -95,19 +104,14 @@ public abstract class MixinShaderStorageBuffer implements IVGBuffer {
         }
 
         IrisRenderSystem.bindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, index, this.id);
+        ci.cancel();
     }
 
-    // === Overwrite bind ===
-
-    @Overwrite
-    public void bind() {
-        IrisRenderSystem.bindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, index, id);
-    }
-
-    // === Overwrite destroy ===
-
-    @Overwrite
-    protected void destroy() {
+    @Inject(method = "destroy", at = @At("HEAD"), cancellable = true)
+    private void vulkanite$destroy(CallbackInfo ci) {
+        if (!vulkanite$shared) {
+            return;
+        }
         IrisRenderSystem.bindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, index, 0);
         if (vkBuffer.isPresent()) {
             VGBuffer captured = vkBuffer.get();
@@ -115,5 +119,6 @@ public abstract class MixinShaderStorageBuffer implements IVGBuffer {
             Vulkanite.INSTANCE.addSyncedCallback(captured::free);
         }
         MemoryUtil.memFree(content);
+        ci.cancel();
     }
 }

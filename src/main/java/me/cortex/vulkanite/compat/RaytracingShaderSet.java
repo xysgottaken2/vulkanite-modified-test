@@ -28,46 +28,57 @@ public class RaytracingShaderSet {
         this.dispatchD = source.dispatchD;
         this.group = source.group;
         List<VShader> shaderList = new ArrayList<>();
+        RaytracingShaderDebug.print(source);
 
-        VShader shader = VShader.compileLoad(ctx, source.raygen, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-        shaderList.add(shader);
-        this.raygen = shader.named();
-
-        this.raymiss = new ShaderModule[source.raymiss.length];
-        for (int i = 0; i < raymiss.length; i++) {
-            shader = VShader.compileLoad(ctx, source.raymiss[i], VK_SHADER_STAGE_MISS_BIT_KHR);
+        try {
+            VShader shader = VShader.compileLoad(ctx, source.name + ".rgen", source.raygen,
+                    VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             shaderList.add(shader);
-            this.raymiss[i] = shader.named();
+            this.raygen = shader.named();
+
+            this.raymiss = new ShaderModule[source.raymiss.length];
+            for (int i = 0; i < raymiss.length; i++) {
+                shader = VShader.compileLoad(ctx, source.name + "_" + i + ".rmiss", source.raymiss[i],
+                        VK_SHADER_STAGE_MISS_BIT_KHR);
+                shaderList.add(shader);
+                this.raymiss[i] = shader.named();
+            }
+
+            this.rayhits = new RayHit[source.rayhit.length];
+            for (int i = 0; i < this.rayhits.length; i++) {
+                var hit = source.rayhit[i];
+
+                ShaderModule close = null;
+                if (hit.close() != null) {
+                    shader = VShader.compileLoad(ctx, source.name + "_" + i + ".rchit", hit.close(),
+                            VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+                    shaderList.add(shader);
+                    close = shader.named();
+                }
+
+                ShaderModule any = null;
+                if (hit.any() != null) {
+                    shader = VShader.compileLoad(ctx, source.name + "_" + i + ".rahit", hit.any(),
+                            VK_SHADER_STAGE_ANY_HIT_BIT_KHR);
+                    shaderList.add(shader);
+                    any = shader.named();
+                }
+
+                ShaderModule intersection = null;
+                if (hit.intersection() != null) {
+                    shader = VShader.compileLoad(ctx, source.name + "_" + i + ".rint", hit.intersection(),
+                            VK_SHADER_STAGE_INTERSECTION_BIT_KHR);
+                    shaderList.add(shader);
+                    intersection = shader.named();
+                }
+
+                this.rayhits[i] = new RayHit(close, any, intersection);
+            }
+            this.allShader = shaderList.toArray(new VShader[0]);
+        } catch (RuntimeException e) {
+            shaderList.forEach(VShader::free);
+            throw e;
         }
-
-        this.rayhits = new RayHit[source.rayhit.length];
-        for (int i = 0; i < this.rayhits.length; i++) {
-            var hit = source.rayhit[i];
-
-            ShaderModule close = null;
-            if (hit.close() != null) {
-                shader = VShader.compileLoad(ctx, hit.close(), VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
-                shaderList.add(shader);
-                close = shader.named();
-            }
-
-            ShaderModule any = null;
-            if (hit.any() != null) {
-                shader = VShader.compileLoad(ctx, hit.any(), VK_SHADER_STAGE_ANY_HIT_BIT_KHR);
-                shaderList.add(shader);
-                any = shader.named();
-            }
-
-            ShaderModule intersection = null;
-            if (hit.intersection() != null) {
-                shader = VShader.compileLoad(ctx, hit.intersection(), VK_SHADER_STAGE_INTERSECTION_BIT_KHR);
-                shaderList.add(shader);
-                intersection = shader.named();
-            }
-
-            this.rayhits[i] = new RayHit(close, any, intersection);
-        }
-        this.allShader = shaderList.toArray(new VShader[0]);
     }
 
     public void apply(RaytracePipelineBuilder builder) {

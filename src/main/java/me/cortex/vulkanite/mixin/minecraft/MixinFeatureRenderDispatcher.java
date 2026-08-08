@@ -14,6 +14,11 @@ public class MixinFeatureRenderDispatcher {
     @Inject(method = "prepareFrame", at = @At("RETURN"))
     private void vulkanite$finishEntityCapture(SubmitNodeStorage storage,
             CallbackInfoReturnable<FeatureRenderDispatcher.PreparedFrame> cir) {
+        // prepareFrame is also used by GUI and item rendering. Only the world
+        // frame opened by LevelRenderer.submitFeatures owns entity RT history.
+        if (!EntityGeometryCollector.INSTANCE.isFrameOpen()) {
+            return;
+        }
         Vulkanite.INSTANCE.getAccelerationManager().setEntityGeometry(EntityGeometryCollector.INSTANCE.endFrame());
     }
 }

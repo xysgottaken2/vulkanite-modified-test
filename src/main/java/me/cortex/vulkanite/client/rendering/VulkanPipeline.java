@@ -83,6 +83,7 @@ public class VulkanPipeline {
 
     private final VImage fallbackImage;
     private final VImageView fallbackImageView;
+    private final VBuffer fallbackMotionBuffer;
     private final FrameUniforms uniforms;
 
     private int fidx;
@@ -110,6 +111,14 @@ public class VulkanPipeline {
         this.fallbackImage = ctx.memory.createImage2D(4, 4, 1, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         this.fallbackImageView = new VImageView(ctx, fallbackImage);
+        this.fallbackMotionBuffer = ctx.memory.createBuffer(4L * Short.BYTES,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                0, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+        long fallbackMotionPtr = fallbackMotionBuffer.map();
+        MemoryUtil.memSet(fallbackMotionPtr, 0, 4L * Short.BYTES);
+        fallbackMotionBuffer.unmap();
+        fallbackMotionBuffer.flush();
 
         this.entityTextureViews = new SharedImageViewTracker[EntityTextureRegistry.CAPACITY];
         for (int i = 0; i < entityTextureViews.length; i++) {
@@ -235,6 +244,7 @@ public class VulkanPipeline {
         blockAtlasSpecularView.free();
         fallbackImageView.free();
         fallbackImage.free();
+        fallbackMotionBuffer.free();
         sampler.free();
         ctexSampler.free();
         uniforms.free();
@@ -302,6 +312,7 @@ public class VulkanPipeline {
         commonLayout = new DescriptorSetLayoutBuilder()
                 .binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_ALL)
                 .binding(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_SHADER_STAGE_ALL)
+                .binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_ALL)
                 .binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)
                 .binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)
                 .binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)
@@ -393,8 +404,10 @@ public class VulkanPipeline {
             entityViews[i] = entityTextureViews[i].getView();
         }
 
-        new DescriptorUpdateBuilder(ctx, 6, fallbackImageView)
+        VBuffer entityMotionBuffer = accelerationManager.getEntityMotionBuffer();
+        new DescriptorUpdateBuilder(ctx, 7, fallbackImageView)
                 .set(commonSet)
+                .buffer(2, entityMotionBuffer != null ? entityMotionBuffer : fallbackMotionBuffer)
                 .uniform(0, uboBuffer)
                 .acceleration(1, tlas) // 此时方法重载完美适配！
                 .imageSampler(3, blockAtlasView.getView(), sampler)

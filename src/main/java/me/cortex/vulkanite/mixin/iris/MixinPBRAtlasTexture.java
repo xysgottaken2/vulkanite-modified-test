@@ -6,6 +6,7 @@ import com.mojang.blaze3d.textures.GpuTexture;
 import me.cortex.vulkanite.client.Vulkanite;
 import me.cortex.vulkanite.compat.GlTextureReflection;
 import me.cortex.vulkanite.compat.IVGImage;
+import me.cortex.vulkanite.compat.RaytracingPackState;
 import me.cortex.vulkanite.lib.memory.VGImage;
 import net.irisshaders.iris.pbr.texture.PBRAtlasTexture;
 import net.irisshaders.iris.pbr.texture.PBRType;
@@ -45,6 +46,9 @@ public abstract class MixinPBRAtlasTexture extends AbstractTexture {
     private GpuTexture vulkanite$makePBRAtlasShared(GpuDevice device, Supplier<String> label, int usage,
             GpuFormat format, int width, int height,
             int depthOrLayers, int mipLevels) {
+        if (!RaytracingPackState.isActive()) {
+            return device.createTexture(label, usage, format, width, height, depthOrLayers, mipLevels);
+        }
         LOGGER.info("Redirecting PBRAtlasTexture.createTexture to Vulkan-shared path for type {}", type);
         if (Vulkanite.INSTANCE == null) {
             LOGGER.warn("Vulkanite instance is null, falling back to plain GL for PBR atlas");

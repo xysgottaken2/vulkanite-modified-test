@@ -17,15 +17,22 @@ import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.core.Direction;
+import net.minecraft.core.BlockPos;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.ARGB;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
+import org.joml.Vector3f;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -34,33 +41,114 @@ public final class EntityGeometryCollector {
     private static final int GEOMETRY_VERTEX_SIZE = 40;
     private static final int UNSUPPORTED_TEXTURE = -1;
     private static final int BLOCK_ATLAS_TEXTURE = -2;
+    private static final long UNKNOWN_OWNER = -1L;
+    private static final long BLOCK_ENTITY_OWNER_DOMAIN = 0x4000000000000000L;
+    private static final long FIRST_PERSON_HAND_OWNER = 0x6000000000000000L;
+    private static final float MAX_TRACKED_MOTION = 16.0f;
     private static final Logger LOGGER = LoggerFactory.getLogger("Vulkanite/EntityGeometry");
 
     private final List<CapturedVertex> vertices = new ArrayList<>();
+    private final Map<SubmissionKey, SubmissionSnapshot> previousSnapshots = new HashMap<>();
+    private final Map<SubmissionKey, SubmissionSnapshot> currentSnapshots = new HashMap<>();
+    private final Map<SubmissionBaseKey, Integer> submissionOccurrences = new HashMap<>();
+    private final ArrayDeque<Long> entitySubmissionOwners = new ArrayDeque<>();
+    private final List<RawSubmission> handSubmissions = new ArrayList<>();
+    private final List<RawSubmission> pendingHandSubmissions = new ArrayList<>();
     private Vec3 cameraPosition = Vec3.ZERO;
     private boolean rayTracingActive;
     private boolean frameOpen;
+    private boolean handFrameOpen;
     private boolean loggedFirstFrame;
+    private long frameNumber;
+    private int matchedSubmissions;
+    private int missingHistorySubmissions;
+    private int vertexCountMismatchSubmissions;
+    private int topologyMismatchSubmissions;
+    private int excessiveMotionSubmissions;
+    private int unknownOwnerSubmissions;
+    private String firstFailureSample;
 
     private EntityGeometryCollector() {
     }
 
-    public void beginFrame(Vec3 cameraPosition) {
+    public void beginFrame(Vec3 cameraPosition, Matrix4fc viewRotationMatrix, Matrix4fc handViewTransform) {
         vertices.clear();
+        currentSnapshots.clear();
+        submissionOccurrences.clear();
+        entitySubmissionOwners.clear();
+        matchedSubmissions = 0;
+        missingHistorySubmissions = 0;
+        vertexCountMismatchSubmissions = 0;
+        topologyMismatchSubmissions = 0;
+        excessiveMotionSubmissions = 0;
+        unknownOwnerSubmissions = 0;
+        firstFailureSample = null;
         this.cameraPosition = cameraPosition;
         this.frameOpen = true;
+        appendPendingHand(viewRotationMatrix, handViewTransform);
+    }
+
+    public void beginHandFrame() {
+        if (!rayTracingActive) {
+            return;
+        }
+        handSubmissions.clear();
+        handFrameOpen = true;
+    }
+
+    public void endHandFrame() {
+        if (!handFrameOpen) {
+            return;
+        }
+        handFrameOpen = false;
+        pendingHandSubmissions.clear();
+        pendingHandSubmissions.addAll(handSubmissions);
+        handSubmissions.clear();
     }
 
     public void setRayTracingActive(boolean active) {
         rayTracingActive = active;
         if (!active) {
             vertices.clear();
+            previousSnapshots.clear();
+            currentSnapshots.clear();
+            submissionOccurrences.clear();
+            entitySubmissionOwners.clear();
+            handSubmissions.clear();
+            pendingHandSubmissions.clear();
             frameOpen = false;
+            handFrameOpen = false;
         }
     }
 
+    public boolean isFrameOpen() {
+        return frameOpen;
+    }
+
+    public boolean isRayTracingActive() {
+        return rayTracingActive;
+    }
+
+    public void beginEntitySubmission(int entityId) {
+        entitySubmissionOwners.push(Integer.toUnsignedLong(entityId));
+    }
+
+    public void beginBlockEntitySubmission(BlockPos blockPos) {
+        entitySubmissionOwners.push(BLOCK_ENTITY_OWNER_DOMAIN ^ blockPos.asLong());
+    }
+
+    public void endEntitySubmission() {
+        if (!entitySubmissionOwners.isEmpty()) {
+            entitySubmissionOwners.pop();
+        }
+    }
+
+    public long currentSubmissionOwner() {
+        return entitySubmissionOwners.isEmpty() ? UNKNOWN_OWNER : entitySubmissionOwners.peek();
+    }
+
     public <S> boolean capture(ModelFeatureRenderer.Submit<S> submit) {
-        if (!rayTracingActive || !frameOpen) {
+        if (!isCapturing()) {
             return false;
         }
         if (submit.renderType().isOutline() || submit.sheetedDecalPose() != null) {
@@ -76,18 +164,24 @@ public final class EntityGeometryCollector {
             return false;
         }
 
-        CapturingConsumer capture = new CapturingConsumer(textureIndex, vertices);
+        List<CapturedVertex> captured = new ArrayList<>();
+        CapturingConsumer capture = new CapturingConsumer(textureIndex, captured);
         VertexConsumer consumer = submit.sprite() != null ? submit.sprite().wrap(capture) : capture;
         PoseStack poseStack = new PoseStack();
         poseStack.last().set(submit.pose());
         submit.model().setupAnim(submit.state());
         submit.model().renderToBuffer(poseStack, consumer, submit.lightCoords(), submit.overlayCoords(), submit.tintedColor());
         capture.finish();
+        long ownerId = handFrameOpen ? FIRST_PERSON_HAND_OWNER : submit.state() instanceof EntityRenderState state
+                ? Integer.toUnsignedLong(((EntityRenderStateExtension) state).vulkanite$getEntityId())
+                : ((EntityOwnedSubmissionExtension) (Object) submit).vulkanite$getOwnerKey();
+        appendSubmission(captured, submissionBaseKey("model", ownerId, submit.model().getClass().getName(),
+                texture, submit.pose()));
         return true;
     }
 
     public boolean capture(BlockModelFeatureRenderer.Submit submit) {
-        if (!rayTracingActive || !frameOpen || submit.renderType().isOutline()
+        if (!isCapturing() || submit.renderType().isOutline()
                 || submit.sheetedDecalPose() != null) {
             return false;
         }
@@ -108,7 +202,7 @@ public final class EntityGeometryCollector {
     }
 
     public boolean capture(ItemFeatureRenderer.Submit submit) {
-        if (!rayTracingActive || !frameOpen || submit.outlineColor() != 0) {
+        if (!isCapturing() || submit.outlineColor() != 0) {
             return false;
         }
         for (BakedQuad quad : submit.quads()) {
@@ -120,13 +214,15 @@ public final class EntityGeometryCollector {
         QuadInstance instance = new QuadInstance();
         instance.setLightCoords(submit.lightCoords());
         instance.setOverlayCoords(submit.overlayCoords());
+        long ownerId = handFrameOpen ? FIRST_PERSON_HAND_OWNER
+                : ((EntityOwnedSubmissionExtension) (Object) submit).vulkanite$getOwnerKey();
         for (BakedQuad quad : submit.quads()) {
             BakedQuad.MaterialInfo material = quad.materialInfo();
             int tintIndex = material.tintIndex();
             int color = material.isTinted() && tintIndex < submit.tintLayers().length
                     ? submit.tintLayers()[tintIndex]
                     : -1;
-            captureBakedQuad(submit.pose(), quad, instance, color);
+            captureBakedQuad(submit.pose(), quad, instance, color, ownerId, "item");
         }
         return true;
     }
@@ -167,10 +263,161 @@ public final class EntityGeometryCollector {
     }
 
     private void captureBakedQuad(PoseStack.Pose pose, BakedQuad quad, QuadInstance instance, int color) {
+        captureBakedQuad(pose, quad, instance, color,
+                handFrameOpen ? FIRST_PERSON_HAND_OWNER : UNKNOWN_OWNER, "baked");
+    }
+
+    private void captureBakedQuad(PoseStack.Pose pose, BakedQuad quad, QuadInstance instance, int color,
+            long ownerId, String kind) {
         instance.setColor(color);
-        CapturingConsumer capture = new CapturingConsumer(textureIndex(quad), vertices);
+        int textureIndex = textureIndex(quad);
+        List<CapturedVertex> captured = new ArrayList<>(4);
+        CapturingConsumer capture = new CapturingConsumer(textureIndex, captured);
         capture.putBakedQuad(pose, quad, instance);
         capture.finish();
+        Identifier atlas = quad.materialInfo().sprite().atlasLocation();
+        appendSubmission(captured, submissionBaseKey(kind, ownerId, quad.getClass().getName(), atlas, pose));
+    }
+
+    private SubmissionBaseKey submissionBaseKey(String kind, long ownerId, String modelClass, Identifier texture,
+            PoseStack.Pose pose) {
+        int poseHash = ownerId == UNKNOWN_OWNER ? poseHash(pose) : 0;
+        return new SubmissionBaseKey(kind, ownerId, modelClass, texture, poseHash);
+    }
+
+    private void appendSubmission(List<CapturedVertex> captured, SubmissionBaseKey baseKey) {
+        if (captured.isEmpty()) {
+            return;
+        }
+        if (handFrameOpen && !frameOpen) {
+            handSubmissions.add(new RawSubmission(captured, baseKey));
+            return;
+        }
+        int occurrence = submissionOccurrences.merge(baseKey, 1, Integer::sum) - 1;
+        SubmissionKey key = new SubmissionKey(baseKey, occurrence);
+        int topologyHash = topologyHash(captured);
+        SubmissionSnapshot previous = previousSnapshots.get(key);
+        float motionStatus;
+        if (baseKey.ownerId == UNKNOWN_OWNER) {
+            unknownOwnerSubmissions++;
+        }
+        if (previous == null) {
+            motionStatus = 0.0f;
+            missingHistorySubmissions++;
+        } else if (previous.positions.length != captured.size() * 3) {
+            motionStatus = -1.0f;
+            vertexCountMismatchSubmissions++;
+        } else if (previous.topologyHash != topologyHash) {
+            motionStatus = -2.0f;
+            topologyMismatchSubmissions++;
+        } else {
+            motionStatus = 1.0f;
+        }
+
+        if (motionStatus > 0.5f) {
+            double originDeltaX = cameraPosition.x - previous.originX;
+            double originDeltaY = cameraPosition.y - previous.originY;
+            double originDeltaZ = cameraPosition.z - previous.originZ;
+            float maxAbs = 0.0f;
+            for (int i = 0; i < captured.size(); i++) {
+                CapturedVertex vertex = captured.get(i);
+                int offset = i * 3;
+                vertex.motionX = (float) (vertex.x - previous.positions[offset] + originDeltaX);
+                vertex.motionY = (float) (vertex.y - previous.positions[offset + 1] + originDeltaY);
+                vertex.motionZ = (float) (vertex.z - previous.positions[offset + 2] + originDeltaZ);
+                maxAbs = Math.max(maxAbs, Math.max(Math.abs(vertex.motionX),
+                        Math.max(Math.abs(vertex.motionY), Math.abs(vertex.motionZ))));
+            }
+            if (!Float.isFinite(maxAbs) || maxAbs > MAX_TRACKED_MOTION) {
+                motionStatus = -3.0f;
+                excessiveMotionSubmissions++;
+            } else {
+                matchedSubmissions++;
+            }
+        }
+
+        if (motionStatus < 0.5f && firstFailureSample == null) {
+            firstFailureSample = "status=" + motionStatus + ", key=" + key
+                    + ", previousEntries=" + previousSnapshots.size();
+        }
+
+        float[] positions = new float[captured.size() * 3];
+        for (int i = 0; i < captured.size(); i++) {
+            CapturedVertex vertex = captured.get(i);
+            int offset = i * 3;
+            positions[offset] = vertex.x;
+            positions[offset + 1] = vertex.y;
+            positions[offset + 2] = vertex.z;
+            vertex.motionStatus = motionStatus;
+            if (motionStatus < 0.5f) {
+                vertex.motionX = 0.0f;
+                vertex.motionY = 0.0f;
+                vertex.motionZ = 0.0f;
+            }
+        }
+        currentSnapshots.put(key, new SubmissionSnapshot(positions, topologyHash,
+                cameraPosition.x, cameraPosition.y, cameraPosition.z));
+        vertices.addAll(captured);
+    }
+
+    private boolean isCapturing() {
+        return rayTracingActive && (frameOpen || handFrameOpen);
+    }
+
+    private void appendPendingHand(Matrix4fc viewRotationMatrix, Matrix4fc handViewTransform) {
+        if (pendingHandSubmissions.isEmpty()) {
+            return;
+        }
+        Matrix4f handToWorld = new Matrix4f(viewRotationMatrix).invert().mul(handViewTransform);
+        for (RawSubmission raw : pendingHandSubmissions) {
+            List<CapturedVertex> transformed = new ArrayList<>(raw.vertices.size());
+            for (CapturedVertex source : raw.vertices) {
+                CapturedVertex vertex = source.copy();
+                Vector3f position = handToWorld.transformPosition(
+                        new Vector3f(source.x, source.y, source.z));
+                Vector3f normal = handToWorld.transformDirection(
+                        new Vector3f(source.nx, source.ny, source.nz)).normalize();
+                vertex.x = position.x;
+                vertex.y = position.y;
+                vertex.z = position.z;
+                vertex.nx = normal.x;
+                vertex.ny = normal.y;
+                vertex.nz = normal.z;
+                transformed.add(vertex);
+            }
+            appendSubmission(transformed, raw.key);
+        }
+    }
+
+    private static int topologyHash(List<CapturedVertex> captured) {
+        int hash = 1;
+        for (CapturedVertex vertex : captured) {
+            hash = 31 * hash + Float.floatToIntBits(vertex.u);
+            hash = 31 * hash + Float.floatToIntBits(vertex.v);
+            hash = 31 * hash + vertex.textureIndex;
+        }
+        return hash;
+    }
+
+    private static int poseHash(PoseStack.Pose pose) {
+        var matrix = pose.pose();
+        int hash = 1;
+        hash = 31 * hash + Float.floatToIntBits(matrix.m00());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m01());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m02());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m03());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m10());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m11());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m12());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m13());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m20());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m21());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m22());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m23());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m30());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m31());
+        hash = 31 * hash + Float.floatToIntBits(matrix.m32());
+        return 31 * hash + Float.floatToIntBits(matrix.m33());
     }
 
     private int textureIndex(BakedQuad quad) {
@@ -182,10 +429,12 @@ public final class EntityGeometryCollector {
 
     public EntityGeometryFrame endFrame() {
         frameOpen = false;
+        logMotionDiagnostics();
         int completeVertexCount = vertices.size() - vertices.size() % 4;
         int quadCount = completeVertexCount / 4;
         if (quadCount == 0) {
             vertices.clear();
+            advanceMotionHistory();
             return null;
         }
 
@@ -220,15 +469,36 @@ public final class EntityGeometryCollector {
 
         NativeBuffer blasVertices = new NativeBuffer(completeVertexCount * 4 * Short.BYTES);
         NativeBuffer geometry = new NativeBuffer(completeVertexCount * GEOMETRY_VERTEX_SIZE);
+        NativeBuffer motion = new NativeBuffer(completeVertexCount * 4 * Short.BYTES);
         ByteBuffer blas = blasVertices.getDirectBuffer();
         ByteBuffer geom = geometry.getDirectBuffer();
+        ByteBuffer motionData = motion.getDirectBuffer();
 
         for (int quad = 0; quad < quadCount; quad++) {
-            encodeQuad(vertices.subList(quad * 4, quad * 4 + 4), blas, geom, quad);
+            encodeQuad(vertices.subList(quad * 4, quad * 4 + 4), blas, geom, motionData, quad);
         }
         vertices.clear();
-        return new EntityGeometryFrame(blasVertices, geometry, quadCount,
+        advanceMotionHistory();
+        return new EntityGeometryFrame(blasVertices, geometry, motion, quadCount,
                 (float) cameraPosition.x, (float) cameraPosition.y, (float) cameraPosition.z);
+    }
+
+    private void advanceMotionHistory() {
+        previousSnapshots.clear();
+        previousSnapshots.putAll(currentSnapshots);
+        currentSnapshots.clear();
+    }
+
+    private void logMotionDiagnostics() {
+        frameNumber++;
+        if (frameNumber % 120L != 0L) {
+            return;
+        }
+        LOGGER.info("Entity motion history frame {}: matched={}, missing={}, vertexCount={}, topology={}, "
+                        + "excessive={}, unknownOwner={}, currentEntries={}, previousEntries={}, firstFailure=[{}]",
+                frameNumber, matchedSubmissions, missingHistorySubmissions, vertexCountMismatchSubmissions,
+                topologyMismatchSubmissions, excessiveMotionSubmissions, unknownOwnerSubmissions,
+                currentSnapshots.size(), previousSnapshots.size(), firstFailureSample);
     }
 
     private static Identifier textureOf(RenderType renderType, TextureAtlasSprite sprite) {
@@ -246,7 +516,8 @@ public final class EntityGeometryCollector {
                 : null;
     }
 
-    private static void encodeQuad(List<CapturedVertex> quad, ByteBuffer blas, ByteBuffer geom, int quadIndex) {
+    private static void encodeQuad(List<CapturedVertex> quad, ByteBuffer blas, ByteBuffer geom,
+            ByteBuffer motion, int quadIndex) {
         CapturedVertex v0 = quad.get(0);
         CapturedVertex v1 = quad.get(1);
         CapturedVertex v2 = quad.get(2);
@@ -296,6 +567,13 @@ public final class EntityGeometryCollector {
             geom.putShort(offset + 32, (short) (blockAtlas ? -1 : -2));
             geom.putShort(offset + 34, (short) (blockAtlas ? 0 : vertex.textureIndex + 1));
             geom.putInt(offset + 36, 0);
+
+            int motionOffset = (quadIndex * 4 + i) * 4 * Short.BYTES;
+            motion.putShort(motionOffset, (short) SodiumResultAdapter.fromFloat(vertex.motionX));
+            motion.putShort(motionOffset + 2, (short) SodiumResultAdapter.fromFloat(vertex.motionY));
+            motion.putShort(motionOffset + 4, (short) SodiumResultAdapter.fromFloat(vertex.motionZ));
+            motion.putShort(motionOffset + 6,
+                    (short) SodiumResultAdapter.fromFloat(vertex.motionStatus));
         }
     }
 
@@ -431,5 +709,40 @@ public final class EntityGeometryCollector {
         int r = 255, g = 255, b = 255, a = 255;
         int lightU, lightV;
         int textureIndex;
+        float motionX, motionY, motionZ;
+        float motionStatus;
+
+        CapturedVertex copy() {
+            CapturedVertex copy = new CapturedVertex();
+            copy.x = x;
+            copy.y = y;
+            copy.z = z;
+            copy.u = u;
+            copy.v = v;
+            copy.nx = nx;
+            copy.ny = ny;
+            copy.nz = nz;
+            copy.r = r;
+            copy.g = g;
+            copy.b = b;
+            copy.a = a;
+            copy.lightU = lightU;
+            copy.lightV = lightV;
+            copy.textureIndex = textureIndex;
+            return copy;
+        }
+    }
+
+    private record RawSubmission(List<CapturedVertex> vertices, SubmissionBaseKey key) {
+    }
+
+    private record SubmissionBaseKey(String kind, long ownerId, String modelClass, Identifier texture, int poseHash) {
+    }
+
+    private record SubmissionKey(SubmissionBaseKey base, int occurrence) {
+    }
+
+    private record SubmissionSnapshot(float[] positions, int topologyHash,
+            double originX, double originY, double originZ) {
     }
 }

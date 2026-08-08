@@ -1,7 +1,6 @@
 package me.cortex.vulkanite.lib.shader;
 
-import me.cortex.vulkanite.lib.shader.reflection.ShaderReflection;
-
+import net.irisshaders.iris.gl.shader.ShaderCompileException;
 import java.nio.ByteBuffer;
 
 import static org.lwjgl.util.shaderc.Shaderc.*;
@@ -36,28 +35,40 @@ public class ShaderCompiler {
     public static ByteBuffer compileShader(String filename, String source, int vulkanStage) {
         long compiler = shaderc_compiler_initialize();
         if (compiler == 0) {
-            throw new RuntimeException("Failed to create shader compiler");
+            throw new ShaderCompileException(filename, "Failed to create shader compiler");
         }
-        long options = shaderc_compile_options_initialize();
-        shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_2);
-        shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_4);
-        shaderc_compile_options_set_generate_debug_info(options);
-        shaderc_compile_options_set_optimization_level(options, shaderc_optimization_level_performance);
+        long options = 0L;
+        long result = 0L;
+        try {
+            options = shaderc_compile_options_initialize();
+            if (options == 0L) {
+                throw new ShaderCompileException(filename, "Failed to create shader compiler options");
+            }
+            shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_2);
+            shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_4);
+            shaderc_compile_options_set_generate_debug_info(options);
+            shaderc_compile_options_set_optimization_level(options, shaderc_optimization_level_performance);
 
-        long result = shaderc_compile_into_spv(compiler, source, vulkanStageToShadercKind(vulkanStage), filename, "main", options);
+            result = shaderc_compile_into_spv(compiler, source, vulkanStageToShadercKind(vulkanStage), filename, "main", options);
+            if (result == 0L) {
+                throw new ShaderCompileException(filename, "shaderc returned no compilation result");
+            }
+            if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
+                throw new ShaderCompileException(filename, shaderc_result_get_error_message(result));
+            }
 
-        if (result == 0) {
-            throw new RuntimeException("Failed to compile shader " + filename + " into SPIR-V");
+            ByteBuffer code = shaderc_result_get_bytes(result);
+            ByteBuffer copy = ByteBuffer.allocateDirect(code.remaining());
+            copy.put(code).flip();
+            return copy;
+        } finally {
+            if (result != 0L) {
+                shaderc_result_release(result);
+            }
+            if (options != 0L) {
+                shaderc_compile_options_release(options);
+            }
+            shaderc_compiler_release(compiler);
         }
-
-        if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
-            throw new RuntimeException("Failed to compile shader " + filename + "into SPIR-V:\n " + shaderc_result_get_error_message(result));
-        }
-        shaderc_compile_options_release(options);
-        shaderc_compiler_release(compiler);
-        ByteBuffer code = shaderc_result_get_bytes(result);
-        var ret = ByteBuffer.allocateDirect(code.capacity()).put(code).rewind();
-        shaderc_result_release(result);
-        return ret;
     }
 }

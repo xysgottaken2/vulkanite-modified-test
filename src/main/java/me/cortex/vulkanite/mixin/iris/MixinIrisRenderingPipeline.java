@@ -8,12 +8,14 @@ import me.cortex.vulkanite.client.rendering.entity.EntityGeometryCollector;
 import me.cortex.vulkanite.compat.IGetRaytracingSource;
 import me.cortex.vulkanite.compat.IVGImage;
 import me.cortex.vulkanite.compat.RaytracingShaderSet;
+import me.cortex.vulkanite.compat.RaytracingPackState;
 import me.cortex.vulkanite.lib.base.VContext;
 import me.cortex.vulkanite.lib.memory.VGImage;
 import net.irisshaders.iris.gl.buffer.ShaderStorageBuffer;
 import net.irisshaders.iris.gl.texture.TextureAccess;
 import net.irisshaders.iris.gl.buffer.ShaderStorageBufferHolder;
 import net.irisshaders.iris.pipeline.IrisRenderingPipeline;
+import net.irisshaders.iris.pbr.texture.PBRTextureManager;
 import net.irisshaders.iris.targets.RenderTargets;
 import net.irisshaders.iris.pipeline.CustomTextureManager;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
@@ -58,6 +60,8 @@ public class MixinIrisRenderingPipeline {
     private VContext ctx;
     @Unique
     private VulkanPipeline pipeline;
+    @Unique
+    private boolean vulkanite$rayTracingPack;
     // Skip the very first renderShadows invocation so that GL composite passes
     // run at least once before the RT shader reads FrameData (which contains
     // resolution_global written by auto_exposure.glsl). On first frame the SSBO
@@ -82,11 +86,28 @@ public class MixinIrisRenderingPipeline {
                 .toArray(VGImage[]::new);
     }
 
+    @Inject(method = "<init>", at = @At("HEAD"))
+    private static void vulkanite$selectPipelineMode(ProgramSet set, CallbackInfo ci) {
+        var passes = ((IGetRaytracingSource) set).getRaytracingSource();
+        boolean rayTracingPack = passes != null && passes.length > 0;
+        boolean activatingRayTracing = rayTracingPack && !RaytracingPackState.isActive();
+        RaytracingPackState.setActive(rayTracingPack);
+        if (activatingRayTracing) {
+            PBRTextureManager.INSTANCE.clear();
+            LOGGER.info("Cleared Iris PBR texture cache before activating Vulkanite");
+        }
+        if (!rayTracingPack) {
+            EntityGeometryCollector.INSTANCE.setRayTracingActive(false);
+            LOGGER.info("No Vulkanite RT passes found; using the unmodified Iris rendering pipeline");
+        }
+    }
+
     @Inject(method = "<init>", at = @At("TAIL"))
     private void injectRTShader(ProgramSet set, CallbackInfo ci) {
         try {
             ctx = Vulkanite.INSTANCE.getCtx();
             var passes = ((IGetRaytracingSource) set).getRaytracingSource();
+            vulkanite$rayTracingPack = passes != null && passes.length > 0;
             if (passes != null && passes.length > 0) {
                 LOGGER.info("Found {} raytracing shader passes, initializing Vulkan pipeline...", passes.length);
                 rtShaderPasses = new RaytracingShaderSet[passes.length];
@@ -108,19 +129,42 @@ public class MixinIrisRenderingPipeline {
                 LOGGER.info("Vulkan raytracing pipeline initialized with {} passes, {} SSBO bindings",
                         rtShaderPasses.length, ssboIds.length);
             } else {
-                LOGGER.info("No raytracing shaders found in shaderpack, Vulkan pipeline not created");
+                RaytracingPackState.setActive(false);
             }
         } catch (Exception e) {
             LOGGER.error("Failed to initialize Vulkan raytracing pipeline", e);
+            if (pipeline != null) {
+                try {
+                    pipeline.destory();
+                } catch (Exception cleanupError) {
+                    e.addSuppressed(cleanupError);
+                }
+            }
+            if (rtShaderPasses != null) {
+                for (RaytracingShaderSet shaderSet : rtShaderPasses) {
+                    if (shaderSet != null) {
+                        try {
+                            shaderSet.delete();
+                        } catch (Exception cleanupError) {
+                            e.addSuppressed(cleanupError);
+                        }
+                    }
+                }
+            }
             pipeline = null;
             rtShaderPasses = null;
+            RaytracingPackState.setActive(false);
             EntityGeometryCollector.INSTANCE.setRayTracingActive(false);
+            if (e instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            throw new RuntimeException("Failed to initialize Vulkan raytracing pipeline", e);
         }
     }
 
     @Inject(method = "beginLevelRendering", at = @At(value = "INVOKE", target = "Lnet/irisshaders/iris/gl/buffer/ShaderStorageBufferHolder;hasResizedScreen(II)V", shift = At.Shift.AFTER))
     private void afterHasResizedScreen(CallbackInfo ci) {
-        if (shaderStorageBufferHolder != null) {
+        if (pipeline != null && shaderStorageBufferHolder != null) {
             // hasResizedScreen only rebinds relative buffers (resizeIfRelative →
             // glBindBufferBase). Static buffers (1, 5) and buffers whose Vulkan-
             // shared GL name was replaced by Vulkanite's MixinShaderStorageBuffer
@@ -136,6 +180,13 @@ public class MixinIrisRenderingPipeline {
             CallbackInfo ci) {
         if (pipeline == null)
             return;
+        try {
+            int blockAtlasGlId = Minecraft.getInstance().getTextureManager()
+                    .getTexture(TextureAtlas.LOCATION_BLOCKS).getTexture().iris$getGlId();
+            PBRTextureManager.INSTANCE.getOrLoadHolder(blockAtlasGlId);
+        } catch (Exception e) {
+            LOGGER.warn("Failed to trigger PBR texture load for block atlas", e);
+        }
         if (!rtFirstFrameSkipped) {
             rtFirstFrameSkipped = true;
             LOGGER.info("Skipping first RT frame to allow FrameData SSBO initialization");
@@ -146,13 +197,6 @@ public class MixinIrisRenderingPipeline {
             buffers = ((ShaderStorageBufferHolderAccessor) shaderStorageBufferHolder).getBuffers();
         }
         var mainTarget = Minecraft.getInstance().gameRenderer.mainRenderTarget();
-        try {
-            int blockAtlasGlId = Minecraft.getInstance().getTextureManager()
-                    .getTexture(TextureAtlas.LOCATION_BLOCKS).getTexture().iris$getGlId();
-            net.irisshaders.iris.pbr.texture.PBRTextureManager.INSTANCE.getOrLoadHolder(blockAtlasGlId);
-        } catch (Exception e) {
-            LOGGER.warn("Failed to trigger PBR texture load for block atlas", e);
-        }
         pipeline.renderPostShadows(mainTarget.width, mainTarget.height, camera, buffers);
     }
 
@@ -169,6 +213,9 @@ public class MixinIrisRenderingPipeline {
             }
             rtShaderPasses = null;
             pipeline = null;
+        }
+        if (vulkanite$rayTracingPack) {
+            RaytracingPackState.setActive(false);
         }
     }
 }

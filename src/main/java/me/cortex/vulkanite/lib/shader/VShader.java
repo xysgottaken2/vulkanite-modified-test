@@ -33,8 +33,12 @@ public class VShader extends TrackedResourceObject {
     }
 
     public static VShader compileLoad(VContext ctx, String source, int stage) {
+        return compileLoad(ctx, "shader", source, stage);
+    }
+
+    public static VShader compileLoad(VContext ctx, String filename, String source, int stage) {
         try (var stack = stackPush()) {
-            ByteBuffer code = ShaderCompiler.compileShader("shader", source, stage);
+            ByteBuffer code = ShaderCompiler.compileShader(filename, source, stage);
 
             VkShaderModuleCreateInfo createInfo = VkShaderModuleCreateInfo.calloc(stack)
                     .sType$Default()

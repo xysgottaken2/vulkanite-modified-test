@@ -64,7 +64,7 @@ public abstract class MixinProgramSet implements IGetRaytracingSource {
             if (hitSources.isEmpty()) throw new IllegalStateException("No hit shaders for pass " + pass);
 
             sourceList.add(new RaytracingShaderSource(
-                    "raypass_" + pass, gen,
+                    "ray" + pass, gen,
                     missSources.toArray(String[]::new),
                     hitSources.toArray(RaytracingShaderSource.RayHitSource[]::new)));
         }

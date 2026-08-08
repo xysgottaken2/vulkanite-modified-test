@@ -4,6 +4,7 @@ import me.cortex.vulkanite.lib.base.VContext;
 import me.cortex.vulkanite.client.rendering.entity.EntityGeometryFrame;
 import me.cortex.vulkanite.lib.descriptors.VDescriptorSetLayout;
 import me.cortex.vulkanite.lib.memory.VAccelerationStructure;
+import me.cortex.vulkanite.lib.memory.VBuffer;
 import me.cortex.vulkanite.lib.other.sync.VSemaphore;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
@@ -79,4 +80,5 @@ public class AccelerationManager {
 
     public long getGeometrySet() { return tlasManager.getGeometrySet(); }
     public VDescriptorSetLayout getGeometryLayout() { return tlasManager.getGeometryLayout(); }
+    public VBuffer getEntityMotionBuffer() { return tlasManager.getEntityMotionBuffer(); }
 }

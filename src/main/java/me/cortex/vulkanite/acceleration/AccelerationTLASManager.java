@@ -36,6 +36,7 @@ import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.VK12.*;
 
 public class AccelerationTLASManager {
+    public static final int ENTITY_INSTANCE_FLAG = 0x800000;
     private static final Logger LOGGER = LoggerFactory.getLogger("Vulkanite/TLASManager");
     private final TLASSectionManager buildDataManager = new TLASSectionManager();
     private final VContext context;
@@ -124,6 +125,7 @@ public class AccelerationTLASManager {
             if (entityGeometry != null) {
                 entityResources = buildEntityBlas(cmd, stack, entityGeometry);
                 buildDataManager.updateEntity(entityResources.structure(), entityResources.geometryBuffer(),
+                        entityResources.motionBuffer(),
                         entityResources.originX(), entityResources.originY(), entityResources.originZ());
             }
 
@@ -251,6 +253,7 @@ public class AccelerationTLASManager {
         float originZ = frame.originZ();
         long vertexBytes = frame.vertices().getLength();
         long geometryBytes = frame.geometry().getLength();
+        long motionBytes = frame.motion().getLength();
         VBuffer buildInput = context.memory.createBuffer(vertexBytes,
                 VK_BUFFER_USAGE_TRANSFER_DST_BIT
                         | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
@@ -259,16 +262,23 @@ public class AccelerationTLASManager {
         VBuffer geometryBuffer = context.memory.createBuffer(geometryBytes,
                 VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, 0);
+        VBuffer motionBuffer = context.memory.createBuffer(motionBytes,
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, 0);
 
         cmd.encodeDataUpload(context.memory, MemoryUtil.memAddress(frame.vertices().getDirectBuffer()),
                 buildInput, 0, vertexBytes);
         cmd.encodeDataUpload(context.memory, MemoryUtil.memAddress(frame.geometry().getDirectBuffer()),
                 geometryBuffer, 0, geometryBytes);
+        cmd.encodeDataUpload(context.memory, MemoryUtil.memAddress(frame.motion().getDirectBuffer()),
+                motionBuffer, 0, motionBytes);
         frame.free();
 
         cmd.encodeBufferBarrier(buildInput, 0, VK_WHOLE_SIZE, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
         cmd.encodeBufferBarrier(geometryBuffer, 0, VK_WHOLE_SIZE, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
+        cmd.encodeBufferBarrier(motionBuffer, 0, VK_WHOLE_SIZE, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
 
         VkAccelerationStructureGeometryKHR.Buffer geometries = VkAccelerationStructureGeometryKHR.calloc(1, stack);
@@ -333,12 +343,13 @@ public class AccelerationTLASManager {
                         .srcAccessMask(VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)
                         .dstAccessMask(VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR),
                 null, null);
-        return new EntityBuildResources(structure, buildInput, geometryBuffer, scratch,
+        return new EntityBuildResources(structure, buildInput, geometryBuffer, motionBuffer, scratch,
                 originX, originY, originZ);
     }
 
     private record EntityBuildResources(VAccelerationStructure structure, VBuffer buildInput,
-            VBuffer geometryBuffer, VBuffer scratch, float originX, float originY, float originZ) {
+            VBuffer geometryBuffer, VBuffer motionBuffer, VBuffer scratch,
+            float originX, float originY, float originZ) {
     }
 
     public VAccelerationStructure getTlas() {
@@ -495,6 +506,8 @@ public class AccelerationTLASManager {
         private int entityInstanceId = -1;
         private int entityGeometryIndex = -1;
         private List<VBuffer> entityGeometryBuffers;
+        private VBuffer entityMotionBuffer;
+        private final Deque<VBuffer> motionBuffersToRelease = new ArrayDeque<>();
         private VAccelerationStructure entityStructure;
 
         public void resizeBindlessSet(int newSize, VFence fence) {
@@ -554,12 +567,12 @@ public class AccelerationTLASManager {
             }
 
             // Queue up the arena dealloc jobs to be done after the fence is done
-            if (!arenaDeallocJobs.isEmpty() || !descPoolsToRelease.isEmpty()) {
+            if (!arenaDeallocJobs.isEmpty() || !descPoolsToRelease.isEmpty() || !motionBuffersToRelease.isEmpty()) {
                 Vulkanite.INSTANCE.addSyncedCallback(this::fenceTick);
             }
         }
 
-        public void updateEntity(VAccelerationStructure structure, VBuffer geometryBuffer,
+        public void updateEntity(VAccelerationStructure structure, VBuffer geometryBuffer, VBuffer motionBuffer,
                 float originX, float originY, float originZ) {
             if (entityInstanceId == -1) {
                 entityInstanceId = alloc();
@@ -570,9 +583,13 @@ public class AccelerationTLASManager {
             if (entityGeometryIndex != -1) {
                 arenaDeallocJobs.add(new ArenaDeallocJob(entityGeometryIndex, 1, entityGeometryBuffers));
             }
+            if (entityMotionBuffer != null) {
+                motionBuffersToRelease.add(entityMotionBuffer);
+            }
 
             entityStructure = structure;
             entityGeometryBuffers = List.of(geometryBuffer);
+            entityMotionBuffer = motionBuffer;
             entityGeometryIndex = arena.allocate(1);
             descUpdateJobs.add(new DescUpdateJob(0, entityGeometryIndex, entityGeometryBuffers));
 
@@ -580,7 +597,7 @@ public class AccelerationTLASManager {
                 var instance = VkAccelerationStructureInstanceKHR.calloc(stack)
                         .mask(0xFF)
                         .flags(VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR)
-                        .instanceCustomIndex(entityGeometryIndex)
+                        .instanceCustomIndex(entityGeometryIndex | ENTITY_INSTANCE_FLAG)
                         .accelerationStructureReference(structure.deviceAddress);
                 instance.transform().matrix(new Matrix4x3f()
                         .translate(originX, originY, originZ)
@@ -603,6 +620,10 @@ public class AccelerationTLASManager {
                 arenaDeallocJobs.add(new ArenaDeallocJob(entityGeometryIndex, 1, entityGeometryBuffers));
                 entityGeometryIndex = -1;
                 entityGeometryBuffers = null;
+            }
+            if (entityMotionBuffer != null) {
+                motionBuffersToRelease.add(entityMotionBuffer);
+                entityMotionBuffer = null;
             }
         }
 
@@ -633,6 +654,13 @@ public class AccelerationTLASManager {
             while (!descPoolsToRelease.isEmpty()) {
                 descPoolsToRelease.poll().free();
             }
+            while (!motionBuffersToRelease.isEmpty()) {
+                motionBuffersToRelease.poll().free();
+            }
+        }
+
+        public VBuffer getEntityMotionBuffer() {
+            return entityMotionBuffer;
         }
 
         public void update(AccelerationBlasBuilder.BLASBuildResult result) {
@@ -730,6 +758,10 @@ public class AccelerationTLASManager {
 
     public VDescriptorSetLayout getGeometryLayout() {
         return buildDataManager.geometryBufferSetLayout;
+    }
+
+    public VBuffer getEntityMotionBuffer() {
+        return buildDataManager.getEntityMotionBuffer();
     }
 
     // Called for cleaning up any remaining loose resources
