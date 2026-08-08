@@ -4,6 +4,7 @@ import it.unimi.dsi.fastutil.objects.Object2ObjectMap;
 import it.unimi.dsi.fastutil.objects.Object2ObjectMap.Entry;
 import me.cortex.vulkanite.client.Vulkanite;
 import me.cortex.vulkanite.client.rendering.VulkanPipeline;
+import me.cortex.vulkanite.client.rendering.entity.EntityGeometryCollector;
 import me.cortex.vulkanite.compat.IGetRaytracingSource;
 import me.cortex.vulkanite.compat.IVGImage;
 import me.cortex.vulkanite.compat.RaytracingShaderSet;
@@ -103,6 +104,7 @@ public class MixinIrisRenderingPipeline {
                 int[] ssboIds = set.getPack().getBufferObjects().keySet().toIntArray();
                 pipeline = new VulkanPipeline(ctx, Vulkanite.INSTANCE.getAccelerationManager(),
                         rtShaderPasses, ssboIds, getCustomTextures());
+                EntityGeometryCollector.INSTANCE.setRayTracingActive(true);
                 LOGGER.info("Vulkan raytracing pipeline initialized with {} passes, {} SSBO bindings",
                         rtShaderPasses.length, ssboIds.length);
             } else {
@@ -112,6 +114,7 @@ public class MixinIrisRenderingPipeline {
             LOGGER.error("Failed to initialize Vulkan raytracing pipeline", e);
             pipeline = null;
             rtShaderPasses = null;
+            EntityGeometryCollector.INSTANCE.setRayTracingActive(false);
         }
     }
 
@@ -155,6 +158,7 @@ public class MixinIrisRenderingPipeline {
 
     @Inject(method = "destroy", at = @At("TAIL"))
     private void onDestroy(CallbackInfo ci) {
+        EntityGeometryCollector.INSTANCE.setRayTracingActive(false);
         if (rtShaderPasses != null) {
             ctx.cmd.waitQueueIdle(0);
             for (var pass : rtShaderPasses) {

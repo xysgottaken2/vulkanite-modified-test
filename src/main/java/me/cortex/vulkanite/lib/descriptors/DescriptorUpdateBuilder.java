@@ -155,6 +155,24 @@ public class DescriptorUpdateBuilder {
         return this;
     }
 
+    public DescriptorUpdateBuilder imageSamplerArray(int binding, int layout, VImageView[] views, VSampler sampler) {
+        var imageInfo = VkDescriptorImageInfo.calloc(views.length, stack);
+        for (int i = 0; i < views.length; i++) {
+            imageInfo.get(i)
+                    .imageLayout(layout)
+                    .imageView(viewOrPlaceholder(views[i]))
+                    .sampler(sampler.sampler);
+        }
+        updates.get()
+                .sType$Default()
+                .dstBinding(binding)
+                .dstSet(set)
+                .descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                .descriptorCount(views.length)
+                .pImageInfo(imageInfo);
+        return this;
+    }
+
     public void apply() {
         updates.limit(updates.position());
         updates.rewind();

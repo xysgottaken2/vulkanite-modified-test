@@ -2,6 +2,7 @@ package me.cortex.vulkanite.client.rendering;
 
 import me.cortex.vulkanite.acceleration.AccelerationManager;
 import me.cortex.vulkanite.client.Vulkanite;
+import me.cortex.vulkanite.client.rendering.entity.EntityTextureRegistry;
 import me.cortex.vulkanite.compat.IVGBuffer;
 import me.cortex.vulkanite.compat.IVGImage;
 import me.cortex.vulkanite.compat.RaytracingShaderSet;
@@ -75,6 +76,7 @@ public class VulkanPipeline {
     private final VSampler ctexSampler;
 
     private final SharedImageViewTracker[] customTextureViews;
+    private final SharedImageViewTracker[] entityTextureViews;
     private final SharedImageViewTracker blockAtlasView;
     private final SharedImageViewTracker blockAtlasNormalView;
     private final SharedImageViewTracker blockAtlasSpecularView;
@@ -87,6 +89,7 @@ public class VulkanPipeline {
     private int frameId;
     private int frameCounter;
     private boolean loggedSsboBindingOnce = false;
+    private boolean loggedEntityTextures;
     private VSemaphore previousSemaphore;
 
     public static final Identifier LOCATION_BLOCKS = TextureAtlas.LOCATION_BLOCKS;
@@ -107,6 +110,12 @@ public class VulkanPipeline {
         this.fallbackImage = ctx.memory.createImage2D(4, 4, 1, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         this.fallbackImageView = new VImageView(ctx, fallbackImage);
+
+        this.entityTextureViews = new SharedImageViewTracker[EntityTextureRegistry.CAPACITY];
+        for (int i = 0; i < entityTextureViews.length; i++) {
+            int index = i;
+            entityTextureViews[i] = new SharedImageViewTracker(ctx, () -> getEntityTexture(index));
+        }
 
         this.blockAtlasView = new SharedImageViewTracker(ctx, () -> {
             AbstractTexture atlas = Minecraft.getInstance().getTextureManager().getTexture(LOCATION_BLOCKS);
@@ -140,8 +149,9 @@ public class VulkanPipeline {
         this.singleUsePool.doReleases();
 
         final int[] signalBuffers = collectSharedSsbos(ssbos);
-        final int[] signalTextures = collectSharedTextures();
-        final int[] signalTexLayouts = collectSharedTextureLayouts();
+        final SharedTextures sharedTextures = collectSharedTextures();
+        final int[] signalTextures = sharedTextures.ids();
+        final int[] signalTexLayouts = sharedTextures.layouts();
 
         if (++frameCounter % 60 == 0) {
             LOGGER.debug("renderPostShadows frame={} fidx={} {}x{} ssboGlIds=[{}]",
@@ -218,6 +228,8 @@ public class VulkanPipeline {
             previousSemaphore.free();
         for (SharedImageViewTracker customTexView : customTextureViews)
             customTexView.free();
+        for (SharedImageViewTracker entityTextureView : entityTextureViews)
+            entityTextureView.free();
         blockAtlasView.free();
         blockAtlasNormalView.free();
         blockAtlasSpecularView.free();
@@ -246,6 +258,15 @@ public class VulkanPipeline {
         int atlasGlId = atlas.getTexture().iris$getGlId();
         var holder = PBRTextureManager.INSTANCE.getOrLoadHolder(atlasGlId);
         return holder != null ? mapper.apply(holder).map(v -> (VImage) v).orElse(fallbackImage) : fallbackImage;
+    }
+
+    private VImage getEntityTexture(int index) {
+        Identifier location = EntityTextureRegistry.INSTANCE.get(index);
+        if (location == null) {
+            return null;
+        }
+        AbstractTexture texture = Minecraft.getInstance().getTextureManager().getTexture(location);
+        return texture != null ? ((IVGImage) texture).getVGImage().map(image -> (VImage) image).orElse(null) : null;
     }
 
     private void transitionFallbackImageLayout() {
@@ -284,6 +305,8 @@ public class VulkanPipeline {
                 .binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)
                 .binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)
                 .binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_ALL)
+                .binding(6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, EntityTextureRegistry.CAPACITY,
+                        VK_SHADER_STAGE_ALL)
                 .build(ctx);
 
         DescriptorSetLayoutBuilder ctexLayoutBuilder = new DescriptorSetLayoutBuilder();
@@ -299,7 +322,7 @@ public class VulkanPipeline {
         storageBufferLayout = ssboLayoutBuilder.build(ctx);
 
         commonDescriptorPool = new VDescriptorPool(ctx, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 10,
-                commonLayout.types);
+                EntityTextureRegistry.CAPACITY, commonLayout.types);
         commonDescriptorPool.allocateSets(commonLayout);
         customtexDescriptorPool = new VDescriptorPool(ctx, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 10,
                 customtexLayout.types);
@@ -330,38 +353,54 @@ public class VulkanPipeline {
         return Arrays.copyOf(sharedSsboIds, count[0]);
     }
 
-    private int[] collectSharedTextures() {
+    private SharedTextures collectSharedTextures() {
         ArrayList<Integer> texIds = new ArrayList<>();
         for (SharedImageViewTracker view : new SharedImageViewTracker[] { blockAtlasView, blockAtlasNormalView,
                 blockAtlasSpecularView }) {
             VImage img = view.getImage();
-            if (img instanceof VGImage vg) {
+            if (img instanceof VGImage vg && !texIds.contains(vg.glId)) {
                 texIds.add(vg.glId);
             }
         }
-        return texIds.stream().mapToInt(x -> x).toArray();
-    }
-
-    private int[] collectSharedTextureLayouts() {
-        ArrayList<Integer> layouts = new ArrayList<>();
-        for (SharedImageViewTracker view : new SharedImageViewTracker[] { blockAtlasView, blockAtlasNormalView,
-                blockAtlasSpecularView }) {
-            if (view.getImage() instanceof VGImage) {
-                layouts.add(GL_LAYOUT_GENERAL_EXT);
+        int entityTextureCount = EntityTextureRegistry.INSTANCE.size();
+        int sharedEntityTextureCount = 0;
+        for (int i = 0; i < entityTextureCount; i++) {
+            VImage image = entityTextureViews[i].getImage();
+            if (image instanceof VGImage vg && !texIds.contains(vg.glId)) {
+                texIds.add(vg.glId);
+                sharedEntityTextureCount++;
             }
         }
-        return layouts.stream().mapToInt(x -> x).toArray();
+        if (!loggedEntityTextures && entityTextureCount > 0) {
+            LOGGER.info("Entity RT textures: {} registered, {} Vulkan-shared",
+                    entityTextureCount, sharedEntityTextureCount);
+            for (int i = 0; i < Math.min(entityTextureCount, 8); i++) {
+                LOGGER.info("  entity texture [{}] {} shared={}", i, EntityTextureRegistry.INSTANCE.get(i),
+                        entityTextureViews[i].getImage() instanceof VGImage);
+            }
+            loggedEntityTextures = true;
+        }
+        int[] ids = texIds.stream().mapToInt(x -> x).toArray();
+        int[] layouts = new int[ids.length];
+        Arrays.fill(layouts, GL_LAYOUT_GENERAL_EXT);
+        return new SharedTextures(ids, layouts);
     }
 
     private void updateDescriptorSets(long commonSet, long ctexSet, long ssboSet, VBuffer uboBuffer,
             VAccelerationStructure tlas, ShaderStorageBuffer[] ssbos) {
-        new DescriptorUpdateBuilder(ctx, 5, fallbackImageView)
+        VImageView[] entityViews = new VImageView[entityTextureViews.length];
+        for (int i = 0; i < entityViews.length; i++) {
+            entityViews[i] = entityTextureViews[i].getView();
+        }
+
+        new DescriptorUpdateBuilder(ctx, 6, fallbackImageView)
                 .set(commonSet)
                 .uniform(0, uboBuffer)
                 .acceleration(1, tlas) // 此时方法重载完美适配！
                 .imageSampler(3, blockAtlasView.getView(), sampler)
                 .imageSampler(4, blockAtlasNormalView.getView(), sampler)
                 .imageSampler(5, blockAtlasSpecularView.getView(), sampler)
+                .imageSamplerArray(6, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, entityViews, sampler)
                 .apply();
 
         final var ctexUpdater = new DescriptorUpdateBuilder(ctx, customTextureViews.length, fallbackImageView)
@@ -409,26 +448,34 @@ public class VulkanPipeline {
 
     private void recordPipelineBarriers(VCmdBuff cmd) {
         try (var stack = stackPush()) {
-            var barriers = VkImageMemoryBarrier.calloc(4 + customTextureViews.length, stack);
-            applyImageBarrier(barriers.get(), blockAtlasView.getImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    VK_ACCESS_SHADER_READ_BIT);
+            int entityTextureCount = EntityTextureRegistry.INSTANCE.size();
+            var barriers = VkImageMemoryBarrier.calloc(3 + customTextureViews.length + entityTextureCount, stack);
+            applySharedImageBarrier(barriers, blockAtlasView.getImage());
             var image = blockAtlasNormalView.getImage();
-            if (image != null)
-                applyImageBarrier(barriers.get(), image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_ACCESS_SHADER_READ_BIT);
+            applySharedImageBarrier(barriers, image);
             image = blockAtlasSpecularView.getImage();
-            if (image != null)
-                applyImageBarrier(barriers.get(), image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_ACCESS_SHADER_READ_BIT);
+            applySharedImageBarrier(barriers, image);
             for (SharedImageViewTracker customtexView : customTextureViews) {
-                applyImageBarrier(barriers.get(), customtexView.getImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_ACCESS_SHADER_READ_BIT);
+                applySharedImageBarrier(barriers, customtexView.getImage());
+            }
+            for (int i = 0; i < entityTextureCount; i++) {
+                applySharedImageBarrier(barriers, entityTextureViews[i].getImage());
             }
             barriers.limit(barriers.position());
             barriers.rewind();
             vkCmdPipelineBarrier(cmd.buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                     VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, null, null, barriers);
         }
+    }
+
+    private static void applySharedImageBarrier(VkImageMemoryBarrier.Buffer barriers, VImage image) {
+        if (image instanceof VGImage) {
+            applyImageBarrier(barriers.get(), image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_SHADER_READ_BIT);
+        }
+    }
+
+    private record SharedTextures(int[] ids, int[] layouts) {
     }
 
     private void recordTraceRays(VCmdBuff cmd, long commonSet, long ctexSet, long ssboSet, int width, int height) {

@@ -1,6 +1,7 @@
 package me.cortex.vulkanite.acceleration;
 
 import me.cortex.vulkanite.lib.base.VContext;
+import me.cortex.vulkanite.client.rendering.entity.EntityGeometryFrame;
 import me.cortex.vulkanite.lib.descriptors.VDescriptorSetLayout;
 import me.cortex.vulkanite.lib.memory.VAccelerationStructure;
 import me.cortex.vulkanite.lib.other.sync.VSemaphore;
@@ -17,6 +18,7 @@ public class AccelerationManager {
     private final List<VSemaphore> syncs = new LinkedList<>();
     // BLAS results queued by background worker thread, drained on render thread in updateTick()
     private final ConcurrentLinkedDeque<AccelerationBlasBuilder.BLASBatchResult> pendingResults = new ConcurrentLinkedDeque<>();
+    private EntityGeometryFrame pendingEntityGeometry;
 
     public AccelerationManager(VContext context, int blasBuildQueue) {
         this.ctx = context;
@@ -39,9 +41,21 @@ public class AccelerationManager {
     }
 
     public VAccelerationStructure buildTLAS(VSemaphore inLink, VSemaphore outLink) {
-        tlasManager.buildTLAS(inLink, outLink, syncs.toArray(new VSemaphore[0]));
+        EntityGeometryFrame entityGeometry;
+        synchronized (this) {
+            entityGeometry = pendingEntityGeometry;
+            pendingEntityGeometry = null;
+        }
+        tlasManager.buildTLAS(inLink, outLink, syncs.toArray(new VSemaphore[0]), entityGeometry);
         syncs.clear();
         return tlasManager.getTlas();
+    }
+
+    public synchronized void setEntityGeometry(EntityGeometryFrame geometry) {
+        if (pendingEntityGeometry != null) {
+            pendingEntityGeometry.free();
+        }
+        pendingEntityGeometry = geometry;
     }
 
     public void sectionRemove(RenderSection section) {
@@ -54,6 +68,12 @@ public class AccelerationManager {
         ctx.cmd.waitQueueIdle(1);
         syncs.forEach(VSemaphore::free);
         syncs.clear();
+        synchronized (this) {
+            if (pendingEntityGeometry != null) {
+                pendingEntityGeometry.free();
+                pendingEntityGeometry = null;
+            }
+        }
         tlasManager.cleanupTick();
     }
 

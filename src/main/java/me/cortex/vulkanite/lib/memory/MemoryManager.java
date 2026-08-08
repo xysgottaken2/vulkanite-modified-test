@@ -91,11 +91,17 @@ public class MemoryManager {
                     if (nativeHandle == 0)
                         throw new IllegalStateException();
 
+                    int staleError = glGetError();
+                    if (staleError != GL_NO_ERROR) {
+                        LOGGER.warn("Discarding stale GL error 0x{} before importing Vulkan memory",
+                                Integer.toHexString(staleError));
+                    }
+
                     int newMemoryObject = glCreateMemoryObjectsEXT();
                     // Everything larger than the shared block size must be dedicated allocation
                     long memorySize = dedicated ? (allocation.ai.offset() + allocation.ai.size()) : sharedBlockSize;
 
-                    if (memorySize > sharedBlockSize) {
+                    if (dedicated) {
                         // Section 6.2 of the OpenGL 4.5 spec
                         glMemoryObjectParameteriEXT(newMemoryObject, GL_DEDICATED_MEMORY_OBJECT_EXT, GL_TRUE);
                         _CHECK_GL_ERROR_();
@@ -204,10 +210,7 @@ public class MemoryManager {
         int vkImageType = VK_IMAGE_TYPE_2D;
         int glImageType = GL_TEXTURE_2D;
 
-        if (height == 1 && depth == 1) {
-            vkImageType = VK_IMAGE_TYPE_1D;
-            glImageType = GL_TEXTURE_1D;
-        } else if (height != 1 && depth != 1) {
+        if (depth != 1) {
             vkImageType = VK_IMAGE_TYPE_3D;
             glImageType = GL_TEXTURE_3D;
         }
