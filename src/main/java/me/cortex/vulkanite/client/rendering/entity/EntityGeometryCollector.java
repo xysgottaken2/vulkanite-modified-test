@@ -1,6 +1,7 @@
 package me.cortex.vulkanite.client.rendering.entity;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.QuadInstance;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import me.cortex.vulkanite.compat.SodiumResultAdapter;
 import me.cortex.vulkanite.mixin.minecraft.RenderSetupAccessor;
@@ -8,10 +9,17 @@ import me.cortex.vulkanite.mixin.minecraft.RenderSetupTextureBindingAccessor;
 import me.cortex.vulkanite.mixin.minecraft.RenderTypeAccessor;
 import net.caffeinemc.mods.sodium.client.util.NativeBuffer;
 import net.minecraft.client.renderer.feature.ModelFeatureRenderer;
+import net.minecraft.client.renderer.feature.BlockModelFeatureRenderer;
+import net.minecraft.client.renderer.feature.ItemFeatureRenderer;
+import net.minecraft.client.renderer.block.dispatch.BlockStateModelPart;
 import net.minecraft.client.renderer.rendertype.RenderSetup;
 import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.client.resources.model.geometry.BakedQuad;
+import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.core.Direction;
 import net.minecraft.resources.Identifier;
+import net.minecraft.util.ARGB;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,11 +32,14 @@ import java.util.Map;
 public final class EntityGeometryCollector {
     public static final EntityGeometryCollector INSTANCE = new EntityGeometryCollector();
     private static final int GEOMETRY_VERTEX_SIZE = 40;
+    private static final int UNSUPPORTED_TEXTURE = -1;
+    private static final int BLOCK_ATLAS_TEXTURE = -2;
     private static final Logger LOGGER = LoggerFactory.getLogger("Vulkanite/EntityGeometry");
 
     private final List<CapturedVertex> vertices = new ArrayList<>();
     private Vec3 cameraPosition = Vec3.ZERO;
     private boolean rayTracingActive;
+    private boolean frameOpen;
     private boolean loggedFirstFrame;
 
     private EntityGeometryCollector() {
@@ -37,17 +48,19 @@ public final class EntityGeometryCollector {
     public void beginFrame(Vec3 cameraPosition) {
         vertices.clear();
         this.cameraPosition = cameraPosition;
+        this.frameOpen = true;
     }
 
     public void setRayTracingActive(boolean active) {
         rayTracingActive = active;
         if (!active) {
             vertices.clear();
+            frameOpen = false;
         }
     }
 
     public <S> boolean capture(ModelFeatureRenderer.Submit<S> submit) {
-        if (!rayTracingActive) {
+        if (!rayTracingActive || !frameOpen) {
             return false;
         }
         if (submit.renderType().isOutline() || submit.sheetedDecalPose() != null) {
@@ -73,7 +86,102 @@ public final class EntityGeometryCollector {
         return true;
     }
 
+    public boolean capture(BlockModelFeatureRenderer.Submit submit) {
+        if (!rayTracingActive || !frameOpen || submit.renderType().isOutline()
+                || submit.sheetedDecalPose() != null) {
+            return false;
+        }
+        if (!canCapture(submit.modelParts())) {
+            return false;
+        }
+
+        QuadInstance instance = new QuadInstance();
+        instance.setLightCoords(submit.lightCoords());
+        instance.setOverlayCoords(submit.overlayCoords());
+        for (BlockStateModelPart part : submit.modelParts()) {
+            for (Direction direction : Direction.values()) {
+                captureBlockQuads(part.getQuads(direction), submit, instance);
+            }
+            captureBlockQuads(part.getQuads(null), submit, instance);
+        }
+        return true;
+    }
+
+    public boolean capture(ItemFeatureRenderer.Submit submit) {
+        if (!rayTracingActive || !frameOpen || submit.outlineColor() != 0) {
+            return false;
+        }
+        for (BakedQuad quad : submit.quads()) {
+            if (textureIndex(quad) == UNSUPPORTED_TEXTURE) {
+                return false;
+            }
+        }
+
+        QuadInstance instance = new QuadInstance();
+        instance.setLightCoords(submit.lightCoords());
+        instance.setOverlayCoords(submit.overlayCoords());
+        for (BakedQuad quad : submit.quads()) {
+            BakedQuad.MaterialInfo material = quad.materialInfo();
+            int tintIndex = material.tintIndex();
+            int color = material.isTinted() && tintIndex < submit.tintLayers().length
+                    ? submit.tintLayers()[tintIndex]
+                    : -1;
+            captureBakedQuad(submit.pose(), quad, instance, color);
+        }
+        return true;
+    }
+
+    private boolean canCapture(List<BlockStateModelPart> parts) {
+        for (BlockStateModelPart part : parts) {
+            for (Direction direction : Direction.values()) {
+                if (!canCaptureQuads(part.getQuads(direction))) {
+                    return false;
+                }
+            }
+            if (!canCaptureQuads(part.getQuads(null))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean canCaptureQuads(List<BakedQuad> quads) {
+        for (BakedQuad quad : quads) {
+            if (textureIndex(quad) == UNSUPPORTED_TEXTURE) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void captureBlockQuads(List<BakedQuad> quads, BlockModelFeatureRenderer.Submit submit,
+            QuadInstance instance) {
+        for (BakedQuad quad : quads) {
+            int tintIndex = quad.materialInfo().tintIndex();
+            boolean useTintLayer = tintIndex != -1 && tintIndex < submit.tintLayers().length;
+            int color = useTintLayer
+                    ? ARGB.multiply(submit.tintColor(), submit.tintLayers()[tintIndex])
+                    : submit.tintColor();
+            captureBakedQuad(submit.pose(), quad, instance, color);
+        }
+    }
+
+    private void captureBakedQuad(PoseStack.Pose pose, BakedQuad quad, QuadInstance instance, int color) {
+        instance.setColor(color);
+        CapturingConsumer capture = new CapturingConsumer(textureIndex(quad), vertices);
+        capture.putBakedQuad(pose, quad, instance);
+        capture.finish();
+    }
+
+    private int textureIndex(BakedQuad quad) {
+        Identifier atlas = quad.materialInfo().sprite().atlasLocation();
+        return TextureAtlas.LOCATION_BLOCKS.equals(atlas)
+                ? BLOCK_ATLAS_TEXTURE
+                : EntityTextureRegistry.INSTANCE.indexOf(atlas);
+    }
+
     public EntityGeometryFrame endFrame() {
+        frameOpen = false;
         int completeVertexCount = vertices.size() - vertices.size() % 4;
         int quadCount = completeVertexCount / 4;
         if (quadCount == 0) {
@@ -184,8 +292,9 @@ public final class EntityGeometryCollector {
             geom.put(offset + 29, snorm8(vertex.ny));
             geom.put(offset + 30, snorm8(vertex.nz));
             geom.put(offset + 31, (byte) 0);
-            geom.putShort(offset + 32, (short) -2);
-            geom.putShort(offset + 34, (short) (vertex.textureIndex + 1));
+            boolean blockAtlas = vertex.textureIndex == BLOCK_ATLAS_TEXTURE;
+            geom.putShort(offset + 32, (short) (blockAtlas ? -1 : -2));
+            geom.putShort(offset + 34, (short) (blockAtlas ? 0 : vertex.textureIndex + 1));
             geom.putInt(offset + 36, 0);
         }
     }
