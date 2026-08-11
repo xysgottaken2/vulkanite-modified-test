@@ -82,7 +82,9 @@ public class MixinIrisRenderingPipeline {
         entryList.sort(Comparator.comparing(Entry::getKey));
 
         return entryList.stream()
-                .map(entry -> ((IVGImage) entry.getValue()).getVGImage())
+                .map(entry -> ((IVGImage) entry.getValue()).getVGImage()
+                        .orElseThrow(() -> new IllegalStateException(
+                                "Custom texture is not Vulkan-shared: " + entry.getKey())))
                 .toArray(VGImage[]::new);
     }
 

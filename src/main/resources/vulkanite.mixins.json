@@ -5,6 +5,7 @@
   "compatibilityLevel": "JAVA_25",
   "client": [
     "iris.MixinIrisRenderingPipeline",
+    "iris.MixinIrisGLDebug",
     "iris.MixinPBRAtlasTexture",
     "iris.MixinProgramSet",
     "iris.MixinShaderPackSourceNames",
@@ -21,6 +22,7 @@
     "minecraft.MixinEntityRenderState",
     "minecraft.MixinItemFeatureRenderer",
     "minecraft.MixinItemFeatureSubmit",
+    "minecraft.MixinGlDebug",
     "minecraft.MixinModelFeatureRenderer",
     "minecraft.MixinModelFeatureSubmit",
     "minecraft.MixinReloadableTexture",

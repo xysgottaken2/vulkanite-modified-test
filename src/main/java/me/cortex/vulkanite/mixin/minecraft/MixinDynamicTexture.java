@@ -24,7 +24,7 @@ public abstract class MixinDynamicTexture extends AbstractTexture {
     private GpuTexture vulkanite$shareDownloadedSkin(GpuDevice device, Supplier<String> label, int usage,
             GpuFormat format, int width, int height, int depthOrLayers, int mipLevels) {
         String labelText = label != null ? label.get() : null;
-        if (!isPlayerTexture(labelText)) {
+        if (!shouldShareWithVulkan(labelText)) {
             return device.createTexture(label, usage, format, width, height, depthOrLayers, mipLevels);
         }
         return createSharedTexture(device, labelText, usage, format, width, height, depthOrLayers, mipLevels,
@@ -34,7 +34,7 @@ public abstract class MixinDynamicTexture extends AbstractTexture {
     @Redirect(method = "createTexture(Ljava/lang/String;)V", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/systems/GpuDevice;createTexture(Ljava/lang/String;ILcom/mojang/blaze3d/GpuFormat;IIII)Lcom/mojang/blaze3d/textures/GpuTexture;", remap = false))
     private GpuTexture vulkanite$shareNamedPlayerTexture(GpuDevice device, String label, int usage,
             GpuFormat format, int width, int height, int depthOrLayers, int mipLevels) {
-        if (!isPlayerTexture(label)) {
+        if (!shouldShareWithVulkan(label)) {
             return device.createTexture(label, usage, format, width, height, depthOrLayers, mipLevels);
         }
         return createSharedTexture(device, label, usage, format, width, height, depthOrLayers, mipLevels,
@@ -65,6 +65,13 @@ public abstract class MixinDynamicTexture extends AbstractTexture {
             }
             return fallback.get();
         }
+    }
+
+    private boolean shouldShareWithVulkan(String label) {
+        // Iris PNG custom textures are DynamicTexture subclasses. They must be
+        // backed by a shared image before VulkanPipeline builds set 2.
+        return isPlayerTexture(label) || ((Object) this).getClass().getName()
+                .equals("net.irisshaders.iris.targets.backed.NativeImageBackedCustomTexture");
     }
 
     private static boolean isPlayerTexture(String label) {

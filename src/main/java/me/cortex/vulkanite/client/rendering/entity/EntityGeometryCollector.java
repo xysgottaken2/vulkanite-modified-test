@@ -67,6 +67,13 @@ public final class EntityGeometryCollector {
     private int excessiveMotionSubmissions;
     private int unknownOwnerSubmissions;
     private String firstFailureSample;
+    private long handFrameNumber;
+    private int handCapturedSubmissions;
+    private int handCapturedVertices;
+    private int handRejectedRenderType;
+    private int handRejectedTexture;
+    private int handRejectedRegistry;
+    private String firstHandSample;
 
     private EntityGeometryCollector() {
     }
@@ -93,6 +100,12 @@ public final class EntityGeometryCollector {
             return;
         }
         handSubmissions.clear();
+        handCapturedSubmissions = 0;
+        handCapturedVertices = 0;
+        handRejectedRenderType = 0;
+        handRejectedTexture = 0;
+        handRejectedRegistry = 0;
+        firstHandSample = null;
         handFrameOpen = true;
     }
 
@@ -103,6 +116,7 @@ public final class EntityGeometryCollector {
         handFrameOpen = false;
         pendingHandSubmissions.clear();
         pendingHandSubmissions.addAll(handSubmissions);
+        logHandDiagnostics();
         handSubmissions.clear();
     }
 
@@ -152,15 +166,18 @@ public final class EntityGeometryCollector {
             return false;
         }
         if (submit.renderType().isOutline() || submit.sheetedDecalPose() != null) {
+            handRejectedRenderType += handFrameOpen ? 1 : 0;
             return false;
         }
 
         Identifier texture = textureOf(submit.renderType(), submit.sprite());
         if (texture == null) {
+            handRejectedTexture += handFrameOpen ? 1 : 0;
             return false;
         }
         int textureIndex = EntityTextureRegistry.INSTANCE.indexOf(texture);
         if (textureIndex < 0) {
+            handRejectedRegistry += handFrameOpen ? 1 : 0;
             return false;
         }
 
@@ -203,10 +220,12 @@ public final class EntityGeometryCollector {
 
     public boolean capture(ItemFeatureRenderer.Submit submit) {
         if (!isCapturing() || submit.outlineColor() != 0) {
+            handRejectedRenderType += handFrameOpen ? 1 : 0;
             return false;
         }
         for (BakedQuad quad : submit.quads()) {
             if (textureIndex(quad) == UNSUPPORTED_TEXTURE) {
+                handRejectedTexture += handFrameOpen ? 1 : 0;
                 return false;
             }
         }
@@ -291,6 +310,11 @@ public final class EntityGeometryCollector {
         }
         if (handFrameOpen && !frameOpen) {
             handSubmissions.add(new RawSubmission(captured, baseKey));
+            handCapturedSubmissions++;
+            handCapturedVertices += captured.size();
+            if (firstHandSample == null) {
+                firstHandSample = baseKey.toString();
+            }
             return;
         }
         int occurrence = submissionOccurrences.merge(baseKey, 1, Integer::sum) - 1;
@@ -499,6 +523,36 @@ public final class EntityGeometryCollector {
                 frameNumber, matchedSubmissions, missingHistorySubmissions, vertexCountMismatchSubmissions,
                 topologyMismatchSubmissions, excessiveMotionSubmissions, unknownOwnerSubmissions,
                 currentSnapshots.size(), previousSnapshots.size(), firstFailureSample);
+    }
+
+    private void logHandDiagnostics() {
+        handFrameNumber++;
+        if (handFrameNumber > 3L && handFrameNumber % 120L != 0L) {
+            return;
+        }
+        float minX = Float.POSITIVE_INFINITY;
+        float minY = Float.POSITIVE_INFINITY;
+        float minZ = Float.POSITIVE_INFINITY;
+        float maxX = Float.NEGATIVE_INFINITY;
+        float maxY = Float.NEGATIVE_INFINITY;
+        float maxZ = Float.NEGATIVE_INFINITY;
+        for (RawSubmission submission : pendingHandSubmissions) {
+            for (CapturedVertex vertex : submission.vertices) {
+                minX = Math.min(minX, vertex.x);
+                minY = Math.min(minY, vertex.y);
+                minZ = Math.min(minZ, vertex.z);
+                maxX = Math.max(maxX, vertex.x);
+                maxY = Math.max(maxY, vertex.y);
+                maxZ = Math.max(maxZ, vertex.z);
+            }
+        }
+        String bounds = handCapturedVertices == 0 ? "empty"
+                : "[(" + minX + ", " + minY + ", " + minZ + ")..(" + maxX + ", " + maxY + ", "
+                        + maxZ + ")]";
+        LOGGER.info("First-person RT capture frame {}: submissions={}, vertices={}, rejectedRenderType={}, "
+                        + "rejectedTexture={}, rejectedRegistry={}, bounds={}, first=[{}]",
+                handFrameNumber, handCapturedSubmissions, handCapturedVertices, handRejectedRenderType,
+                handRejectedTexture, handRejectedRegistry, bounds, firstHandSample);
     }
 
     private static Identifier textureOf(RenderType renderType, TextureAtlasSprite sprite) {
