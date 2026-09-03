@@ -27,6 +27,8 @@ import static org.lwjgl.opengl.EXTMemoryObjectWin32.GL_HANDLE_TYPE_OPAQUE_WIN32_
 import static org.lwjgl.opengl.GL11C.*;
 import static org.lwjgl.opengl.GL12.GL_TEXTURE_3D;
 import static org.lwjgl.opengl.GL12.GL_TEXTURE_WRAP_R;
+import static org.lwjgl.opengl.GL12C.GL_CLAMP_TO_EDGE;
+import static org.lwjgl.opengl.GL31C.GL_TEXTURE_RECTANGLE;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.util.vma.Vma.*;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
@@ -207,12 +209,30 @@ public class MemoryManager {
     public VGImage createSharedImage(int width, int height, int depth, int mipLevels, int vkFormat, int glFormat,
             int usage, int properties) {
 
-        int vkImageType = VK_IMAGE_TYPE_2D;
-        int glImageType = GL_TEXTURE_2D;
+        int glImageType = depth != 1 ? GL_TEXTURE_3D : GL_TEXTURE_2D;
+        return createSharedImage(width, height, depth, mipLevels, vkFormat, glFormat, usage, properties, glImageType);
+    }
 
-        if (depth != 1) {
-            vkImageType = VK_IMAGE_TYPE_3D;
-            glImageType = GL_TEXTURE_3D;
+    public VGImage createSharedImage(int width, int height, int depth, int mipLevels, int vkFormat, int glFormat,
+            int usage, int properties, int glImageType) {
+
+        int vkImageType;
+        int dimensions;
+        switch (glImageType) {
+            case GL_TEXTURE_1D -> {
+                vkImageType = VK_IMAGE_TYPE_1D;
+                dimensions = 1;
+            }
+            case GL_TEXTURE_2D, GL_TEXTURE_RECTANGLE -> {
+                vkImageType = VK_IMAGE_TYPE_2D;
+                dimensions = 2;
+            }
+            case GL_TEXTURE_3D -> {
+                vkImageType = VK_IMAGE_TYPE_3D;
+                dimensions = 3;
+            }
+            default -> throw new IllegalArgumentException("Unsupported shared GL texture target: 0x"
+                    + Integer.toHexString(glImageType));
         }
 
         try (var stack = stackPush()) {
@@ -256,6 +276,13 @@ public class MemoryManager {
                     glTextureParameteri(glId, GL_TEXTURE_WRAP_S, GL_REPEAT);
                     glTextureParameteri(glId, GL_TEXTURE_WRAP_T, GL_REPEAT);
                     break;
+                case GL_TEXTURE_RECTANGLE:
+                    glTextureStorageMem2DEXT(glId, mipLevels, glFormat, width, height, memoryObject, alloc.ai.offset());
+                    glTextureParameteri(glId, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTextureParameteri(glId, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTextureParameteri(glId, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTextureParameteri(glId, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    break;
                 case GL_TEXTURE_3D:
                     glTextureStorageMem3DEXT(glId, mipLevels, glFormat, width, height, depth, memoryObject,
                             alloc.ai.offset());
@@ -269,10 +296,11 @@ public class MemoryManager {
 
             int createErr = glGetError();
             if (createErr != GL_NO_ERROR) {
-                LOGGER.error("createSharedImage: glTextureStorageMem2DEXT produced GL error 0x{} ({}x{} glId={})",
-                        Integer.toHexString(createErr), width, height, glId);
+                LOGGER.error("createSharedImage: GL storage produced error 0x{} ({}x{}x{}, target=0x{}, glId={})",
+                        Integer.toHexString(createErr), width, height, depth,
+                        Integer.toHexString(glImageType), glId);
             }
-            return new VGImage(alloc, width, height, depth, mipLevels, vkFormat, glFormat, glId);
+            return new VGImage(alloc, width, height, depth, mipLevels, vkFormat, glFormat, glId, dimensions);
         }
     }
 

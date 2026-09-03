@@ -21,6 +21,14 @@ public class VGImage extends VImage {
         this.vkMemory = allocation.ai.deviceMemory();
     }
 
+    VGImage(VmaAllocator.ImageAllocation allocation, int width, int height, int depth, int mipLayers, int format,
+            int glFormat, int glId, int dimensions) {
+        super(allocation, width, height, depth, mipLayers, format, dimensions);
+        this.glId = glId;
+        this.glFormat = glFormat;
+        this.vkMemory = allocation.ai.deviceMemory();
+    }
+
     /** The Minecraft GpuTexture wrapper will delete the OpenGL texture name. */
     public void transferGlTextureOwnership() {
         ownsGlTexture = false;

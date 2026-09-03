@@ -16,6 +16,11 @@ public class VImage {
     private static Logger LOGGER = LoggerFactory.getLogger(VImage.class.getName());
 
     VImage(VmaAllocator.ImageAllocation allocation, int width, int height, int depth, int mipLayers, int format) {
+        this(allocation, width, height, depth, mipLayers, format, inferDimensions(height, depth));
+    }
+
+    VImage(VmaAllocator.ImageAllocation allocation, int width, int height, int depth, int mipLayers, int format,
+            int dimensions) {
         this.allocation = allocation;
         this.width = width;
         this.height = height;
@@ -23,15 +28,17 @@ public class VImage {
         this.format = format;
         this.depth = depth;
 
-        int dimensions = 3;
-
-        if (height == 1 && depth == 1) {
-            dimensions = 1;
-        } else if (height != 1 && depth == 1) {
-            dimensions = 2;
+        if (dimensions < 1 || dimensions > 3) {
+            throw new IllegalArgumentException("Image dimensions must be between 1 and 3");
         }
-
         this.dimensions = dimensions;
+    }
+
+    private static int inferDimensions(int height, int depth) {
+        if (depth != 1) {
+            return 3;
+        }
+        return height != 1 ? 2 : 1;
     }
 
     public synchronized void retainImageView() {

@@ -373,6 +373,12 @@ public class VulkanPipeline {
                 texIds.add(vg.glId);
             }
         }
+        for (SharedImageViewTracker view : customTextureViews) {
+            VImage image = view.getImage();
+            if (image instanceof VGImage vg && !texIds.contains(vg.glId)) {
+                texIds.add(vg.glId);
+            }
+        }
         int entityTextureCount = EntityTextureRegistry.INSTANCE.size();
         int sharedEntityTextureCount = 0;
         for (int i = 0; i < entityTextureCount; i++) {

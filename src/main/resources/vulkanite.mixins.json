@@ -4,6 +4,8 @@
   "package": "me.cortex.vulkanite.mixin",
   "compatibilityLevel": "JAVA_25",
   "client": [
+    "iris.MixinGlResource",
+    "iris.MixinGlTexture",
     "iris.MixinIrisRenderingPipeline",
     "iris.MixinIrisGLDebug",
     "iris.MixinPBRAtlasTexture",
