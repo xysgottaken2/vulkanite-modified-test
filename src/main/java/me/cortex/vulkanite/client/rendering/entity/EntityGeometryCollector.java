@@ -647,8 +647,18 @@ public final class EntityGeometryCollector {
         }
     }
 
+    // Entity vertices are stored in camera-relative world coordinates (they can
+    // be dozens of blocks away from the origin), so they must be encoded as IEEE
+    // fp16 bit patterns — the same encoding used for the BLAS vertex buffer above.
+    // Ray tracing shaderpacks decode entity quad positions with unpackHalf2x16
+    // (Dirt-RT's decodeVertexObjectPosition, entity branch) to rebuild world-space
+    // texture gradients for LOD/anisotropic filtering. Using the terrain-style
+    // fixed-point (v + 8) * 2048 encoding here instead would make the pack
+    // reinterpret those bits as fp16: values wrap, invert and explode into ±Inf
+    // and NaN past a few blocks of camera distance, corrupting the gradients and
+    // leaving entity textures stretched or fully black depending on the view.
     private static short encodeGeometryPosition(float value) {
-        return (short) Math.round((value + 8.0f) * 2048.0f);
+        return (short) SodiumResultAdapter.fromFloat(value);
     }
 
     private static byte snorm8(float value) {
