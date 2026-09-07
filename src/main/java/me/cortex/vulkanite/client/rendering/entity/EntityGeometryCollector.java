@@ -44,6 +44,11 @@ public final class EntityGeometryCollector {
     private static final long UNKNOWN_OWNER = -1L;
     private static final long BLOCK_ENTITY_OWNER_DOMAIN = 0x4000000000000000L;
     private static final long FIRST_PERSON_HAND_OWNER = 0x6000000000000000L;
+    // Mirrors net.irisshaders.iris.pathways.HandRenderer#DEPTH (0.125), the depth
+    // scale Iris applies to the first-person projection matrix "so the hand
+    // doesn't clip through blocks". The ray traced viewmodel needs the same
+    // factor applied to its geometry instead (see appendPendingHand).
+    private static final float FIRST_PERSON_DEPTH_SCALE = 0.125f;
     private static final float MAX_TRACKED_MOTION = 16.0f;
     private static final Logger LOGGER = LoggerFactory.getLogger("Vulkanite/EntityGeometry");
 
@@ -392,7 +397,18 @@ public final class EntityGeometryCollector {
         if (pendingHandSubmissions.isEmpty()) {
             return;
         }
-        Matrix4f handToWorld = new Matrix4f(viewRotationMatrix).invert().mul(handViewTransform);
+        // The GL pipeline never lets the viewmodel clip through the world: Iris renders
+        // the hand with a projection whose depth is scaled by HandRenderer.DEPTH
+        // (0.125), keeping it in front of nearby blocks and entities. Ray tracing has
+        // no depth buffer priority to exploit, so apply the same factor directly to
+        // the geometry: uniformly scaling the hand about the camera in view space
+        // keeps every vertex on its original camera ray (identical on-screen
+        // position, size and interpolated attributes) while compressing the
+        // viewmodel into a thin shell hugging the eye, closer than blocks or
+        // entities can ever reach, so they can no longer intersect it.
+        Matrix4f handToWorld = new Matrix4f(viewRotationMatrix).invert()
+                .scale(FIRST_PERSON_DEPTH_SCALE)
+                .mul(handViewTransform);
         for (RawSubmission raw : pendingHandSubmissions) {
             List<CapturedVertex> transformed = new ArrayList<>(raw.vertices.size());
             for (CapturedVertex source : raw.vertices) {

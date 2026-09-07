@@ -14,11 +14,32 @@ jobs:
       - uses: actions/setup-java@v3
         with:
           distribution: 'zulu'
-          java-version: '17'
+          java-version: '25'
       - uses: actions/cache@v3
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+      # gradle.properties carries the maintainer's machine-local settings (a
+      # Windows JDK path and a localhost proxy) that do not exist on CI runners.
+      # Strip them here instead of removing them from the file itself.
+      - name: Remove machine-local Gradle settings
+        run: |
+          sed -i \
+            -e '/^org\.gradle\.java\.home=/d' \
+            -e '/^systemProp\.http\.proxy/d' \
+            -e '/^systemProp\.https\.proxy/d' \
+            -e '/^systemProp\.socks/d' \
+            -e 's/-Dhttp\.proxyHost=[^ ]* *//g' \
+            -e 's/-Dhttp\.proxyPort=[^ ]* *//g' \
+            -e 's/-Dhttps\.proxyHost=[^ ]* *//g' \
+            -e 's/-Dhttps\.proxyPort=[^ ]* *//g' \
+            gradle.properties
       - run: ./gradlew build --stacktrace --no-daemon
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-artifacts
+          path: build/libs/
