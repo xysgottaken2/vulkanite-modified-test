@@ -177,6 +177,29 @@ jobs:
           -PngxVendorConfig=${{ env.NGX_VENDOR_CONFIG }}
           -PngxShimConfig=${{ env.NGX_SHIM_CONFIG }}
 
+      # bundleNgxNatives already fails the build if an input is missing, but assert the natives
+      # actually landed inside the jar too — a task that silently stopped being wired to
+      # processResources would otherwise still produce a green build and a DLSS-less jar.
+      - name: Verify DLSS natives are bundled in the jar
+        run: |
+          jar=$(ls build/libs/*.jar | grep -v -- '-sources' | head -1)
+          echo "Inspecting ${jar}"
+          found=$(unzip -l "${jar}" | grep 'vulkanite/natives/' || true)
+          if [ -z "${found}" ]; then
+            echo "::error::no NGX natives found in ${jar} — bundleNgxNatives is not wired into processResources"
+            exit 1
+          fi
+          echo "${found}"
+          for expected in windows-x64/ngxshim.dll linux-x64/libngxshim.so \
+                          windows-x64/nvngx_dlss.dll windows-x64/nvngx_dlssd.dll \
+                          linux-x64/libnvidia-ngx-dlss.so linux-x64/libnvidia-ngx-dlssd.so; do
+            if ! echo "${found}" | grep -q "${expected}"; then
+              echo "::error::expected ${expected} in ${jar}"
+              exit 1
+            fi
+          done
+          echo "All expected NGX natives are present."
+
       - name: Upload DLSS-bundled jar
         uses: actions/upload-artifact@v4
         with:

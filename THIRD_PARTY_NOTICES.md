@@ -26,6 +26,7 @@ Bundled NVIDIA SDK runtime libraries may include files matching:
 - `vulkanite/natives/windows-x64/nvngx_dlss.dll`
 - `vulkanite/natives/windows-x64/nvngx_dlssd.dll`
 - `vulkanite/natives/windows-x64/nvngx_dlssg.dll`
+- `vulkanite/natives/linux-x64/libnvidia-ngx-dlss.so*`
 - `vulkanite/natives/linux-x64/libnvidia-ngx-dlssd.so*`
 - `vulkanite/natives/linux-x64/libnvidia-ngx-dlssg.so*`
 

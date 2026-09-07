@@ -144,13 +144,15 @@ def ngxNativePlatforms = [
         name: "windows-x64",
         shimIncludes: ["ngxshim.dll"],
         vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Windows_x86_64/${vendorConfig}") },
-        vendorIncludes: ["nvngx_dlssd.dll", "nvngx_dlssg.dll"]
+        // nvngx_dlss.dll is the DLSS-SR runtime. Caustica's equivalent list omits it because Caustica
+        // only uses Ray Reconstruction and Frame Generation; Vulkanite ports DLSS-SR as well.
+        vendorIncludes: ["nvngx_dlss.dll", "nvngx_dlssd.dll", "nvngx_dlssg.dll"]
     ],
     [
         name: "linux-x64",
         shimIncludes: ["libngxshim.so"],
         vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Linux_x86_64/${vendorConfig}") },
-        vendorIncludes: ["libnvidia-ngx-dlssd.so*", "libnvidia-ngx-dlssg.so*"]
+        vendorIncludes: ["libnvidia-ngx-dlss.so*", "libnvidia-ngx-dlssd.so*", "libnvidia-ngx-dlssg.so*"]
     ]
 ]
 def ngxNativePlatformByName = ngxNativePlatforms.collectEntries { platform -> [(platform.name): platform] }

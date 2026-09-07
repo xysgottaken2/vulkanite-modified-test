@@ -284,8 +284,11 @@ public final class NgxRuntime {
                         List.of("nvngx_dlssd.dll", "nvngx_dlssg.dll", "nvngx_dlss.dll"), List.of(), true);
             }
             if (os.contains("linux") && x64) {
+                // The ".so" suffix keeps these prefixes distinct: "libnvidia-ngx-dlss.so" does not
+                // prefix-match "libnvidia-ngx-dlssd.so.310.7.0", so a missing SR runtime is still
+                // reported when only the RR/FG ones are present.
                 return new PlatformNatives("linux-x64", "libngxshim.so", List.of(),
-                        List.of("libnvidia-ngx-dlssd.so", "libnvidia-ngx-dlssg.so"), true);
+                        List.of("libnvidia-ngx-dlss.so", "libnvidia-ngx-dlssd.so", "libnvidia-ngx-dlssg.so"), true);
             }
             return new PlatformNatives(os + "/" + arch, System.mapLibraryName("ngxshim"), List.of(), List.of(), false);
         }
