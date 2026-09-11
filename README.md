@@ -94,11 +94,74 @@ Retained and updated the chunk-build pipeline mixins (`MixinChunkBuildResult`, `
 - **Biased texture coordinates**: Handles Iris's ±1 bias encoding at offset 12
 - **Separate BLAS + geometry buffers**: Half-float vertex positions for acceleration structures (8 bytes/vertex) plus a 160-byte Quad struct for the geometry buffer matching `data.glsl` layouts
 
+### DLSS (NVIDIA NGX)
+Ported from [Caustica](https://github.com/xysgottaken2/Caustica) so the DLSS stack does not have to be
+reimplemented and re-tested here. What landed:
+
+| Component | Path | Role |
+|---|---|---|
+| `ngx_shim.cpp` + `CMakeLists.txt` | `native/ngx_shim/` | Flat C ABI over the static-only NGX SDK, so Java's FFM can call it |
+| `NgxLibrary` | `dlss/NgxLibrary.java` | `java.lang.foreign` bindings for all 17 shim exports |
+| `NgxRuntime` | `dlss/NgxRuntime.java` | Single NGX init/shutdown per Vulkan device; extracts bundled natives |
+| `DlssSuperResolution` | `dlss/DlssSuperResolution.java` | DLSS-SR: denoise + upscale from color/depth/motion vectors |
+| `DlssRayReconstruction` | `dlss/DlssRayReconstruction.java` | DLSS-RR: denoise + upscale from path-traced guide buffers |
+| `DlssConfig` / `DlssResource` | `dlss/` | System-property settings; the (view, image, format, size) tuple NGX needs |
+
+Both features share one NGX instance and are created lazily off `Vulkanite.INSTANCE`, so a machine
+without NGX never pays for them at startup. Every failure path latches and returns `false` so the
+renderer falls back rather than dropping the frame. Teardown order is enforced in `Vulkanite.destroy()`:
+features released → `ngxshim_shutdown` → device cleanup.
+
+`VContext` now carries the `VkInstance` / `VkPhysicalDevice` its `VkDevice` was created from — NGX init
+needs all three handles plus `vkGetDeviceProcAddr`, and they were previously only reachable through
+LWJGL's back-references.
+
+> **Status: plumbing, not pixels.** The NGX lifecycle is live and reachable, but no Vulkanite
+> ray-tracing pass feeds these features yet. DLSS-SR needs a lower-res color target plus depth and
+> motion vectors at render res; DLSS-RR additionally needs diffuse albedo, specular albedo,
+> world-space normals with roughness in `.w`, and reflection motion vectors. Vulkanite's passes are
+> defined by the Iris shader pack, so wiring this up means exposing those targets from the pack and
+> calling `getDlssSuperResolution().ensureFeature(...)` / `.evaluate(...)` around
+> `VulkanPipeline.recordTraceRays`. Until then, enabling the flags initializes NGX and logs
+> availability but does not change the image.
+
+Settings are JVM system properties (Vulkanite has no config file layer):
+
+```
+-Dvulkanite.dlss.sr=true          # DLSS Super Resolution
+-Dvulkanite.dlss.sr.quality=2     # 0 auto, 1 max quality, 2 balanced, 3 max perf, 4 ultra perf, 5 DLAA
+-Dvulkanite.dlss.sr.preset=11     # 0 = DLL default, 11 = Preset K (transformer model)
+-Dvulkanite.dlss.rr=true          # DLSS Ray Reconstruction (same .quality / .preset keys)
+-Dvulkanite.ngx.path=/path/to     # use a locally built shim instead of the bundled one
+-Dvulkanite.ngx.extract=false     # do not extract bundled natives
+```
+
+`NGXSHIM_VERBOSE=1` turns on per-call shim tracing plus NGX's own verbose logging sink — the NGX core
+fails deep inside the driver, and its last log line before a fault is the useful clue.
+
+**Building the shim.** No NVIDIA binary is checked in. Build it against a checkout of
+[NVIDIA/DLSS](https://github.com/NVIDIA/DLSS):
+
+```bash
+git clone https://github.com/NVIDIA/DLSS third_party/DLSS
+DLSS_SDK=$PWD/third_party/DLSS VULKAN_SDK=/usr \
+  cmake -S native/ngx_shim -B build/cmake/ngx_shim -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cmake/ngx_shim --config Release
+
+DLSS_SDK=$PWD/third_party/DLSS ./gradlew build -PbundleNgxNatives=true
+```
+
+Bundling is opt-in, so a plain `./gradlew build` still produces a working (DLSS-less) mod. The
+`Native NGX (DLSS)` workflow builds both platforms and uploads a bundled jar as an artifact.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the NVIDIA license boundary.
+
 ### Build & CI
 - **GitHub Actions**: Added Gradle build workflow (`.github/workflows/new.yml`)
+- **NGX shim CI**: `native-ngx.yml` builds `ngxshim.dll` / `libngxshim.so` from the public DLSS SDK on Windows + Linux runners and packages a DLSS-bundled jar
 - **LWJGL**: Upgraded to BOM-managed 3.4.1, removed platform-specific native hack
 - **Java toolchain**: Set to Java 25 with `--enable-native-access=ALL-UNNAMED`
 - **Proxy support**: Configured for development environments
+
 
 ---
 
@@ -120,6 +183,7 @@ Retained and updated the chunk-build pipeline mixins (`MixinChunkBuildResult`, `
   - `VK_KHR_shader_draw_parameters`
   - `VK_KHR_get_memory_requirements_2`
   - `VK_KHR_get_physical_device_properties_2`
+- For **DLSS**: an NVIDIA RTX GPU with a driver that exposes DLSS Super Resolution / Ray Reconstruction, plus the NGX natives (built or bundled — see [DLSS](#dlss-nvidia-ngx))
 
 ## Building
 ```bash
@@ -131,6 +195,12 @@ The compiled mod JAR will be in `build/libs/`.
 ## Credits
 - **Original author**: [mcrcortex](https://github.com/mcrcortex) — creator of Vulkanite, the first Minecraft mod to bring hardware ray tracing via OpenGL-Vulkan interop
 - **Maintainer**: [sjrsjz](https://github.com/sjrsjz) — 26.2 port, Sodium 0.9 / Iris 1.11.2 compatibility, memory fixes, device loss recovery, SSBO interop rewrite, XHFP geometry pipeline
+- **DLSS / NGX integration**: ported from [Caustica](https://github.com/xysgottaken2/Caustica) by ComfyFluffy and contributors (LGPL-3.0-or-later)
+- **NVIDIA DLSS**: this product contains source code and may distribute runtime components provided by NVIDIA Corporation — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 
 ## License
 This project is based on the original Vulkanite by mcrcortex. See [LICENSE](LICENSE) for details.
+
+The DLSS integration under `me.cortex.vulkanite.dlss` and `native/ngx_shim` is ported from Caustica
+and remains LGPL-3.0-or-later. Bundled NVIDIA SDK runtime libraries are **not** covered by that grant;
+see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

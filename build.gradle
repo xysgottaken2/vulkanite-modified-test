@@ -100,3 +100,140 @@ dependencies {
     implementation("org.lwjgl:lwjgl-meshoptimizer:$lwjglVersion")
     implementation("org.joml:joml:${jomlVersion}")
 }
+
+// ===== NVIDIA NGX (DLSS) natives: opt-in =====
+// native/ngx_shim builds ngxshim.dll / libngxshim.so against the NVIDIA DLSS SDK, and the vendor
+// nvngx_* feature libraries ship alongside it. Both are NVIDIA-licensed binaries and are NOT checked
+// into this repository (see THIRD_PARTY_NOTICES.md) — they are produced by the `native-ngx` CI
+// workflow and bundled here.
+//
+// Bundling is OPT-IN: a plain `./gradlew build` (what the existing Check Build workflow runs) is
+// unaffected, and the mod builds without DLSS. Pass -PbundleNgxNatives=true to include them.
+def bundleNgxNativesRequested = findProperty("bundleNgxNatives") != null
+def ngxShimConfig = (findProperty("ngxShimConfig") ?: "release").toString().toLowerCase(Locale.ROOT)
+def ngxVendorConfig = {
+    def normalized = (findProperty("ngxVendorConfig") ?: "rel").toString().toLowerCase(Locale.ROOT)
+    if (normalized == "release") {
+        return "rel"
+    }
+    if (normalized == "debug") {
+        return "dev"
+    }
+    if (normalized != "rel" && normalized != "dev") {
+        throw new GradleException("Unknown ngxVendorConfig '${normalized}'. Expected 'rel' or 'dev'.")
+    }
+    return normalized
+}()
+
+def ngxNativeGenRoot = layout.buildDirectory.dir("generated/ngx-natives")
+def ngxShimOutDir = new File(layout.buildDirectory.dir("native/ngx_shim").get().asFile, ngxShimConfig)
+def ngxCurrentPlatform = {
+    def os = org.gradle.internal.os.OperatingSystem.current()
+    def arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT)
+    def x64 = arch == "x86_64" || arch == "amd64"
+    if (os.windows && x64) {
+        return "windows-x64"
+    }
+    if (os.linux && x64) {
+        return "linux-x64"
+    }
+    return null
+}()
+def ngxNativePlatforms = [
+    [
+        name: "windows-x64",
+        shimIncludes: ["ngxshim.dll"],
+        vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Windows_x86_64/${vendorConfig}") },
+        // nvngx_dlss.dll is the DLSS-SR runtime. Caustica's equivalent list omits it because Caustica
+        // only uses Ray Reconstruction and Frame Generation; Vulkanite ports DLSS-SR as well.
+        vendorIncludes: ["nvngx_dlss.dll", "nvngx_dlssd.dll", "nvngx_dlssg.dll"]
+    ],
+    [
+        name: "linux-x64",
+        shimIncludes: ["libngxshim.so"],
+        vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Linux_x86_64/${vendorConfig}") },
+        vendorIncludes: ["libnvidia-ngx-dlss.so*", "libnvidia-ngx-dlssd.so*", "libnvidia-ngx-dlssg.so*"]
+    ]
+]
+def ngxNativePlatformByName = ngxNativePlatforms.collectEntries { platform -> [(platform.name): platform] }
+def requestedNgxPlatforms = (findProperty("ngxPlatforms") ?: "current").toString()
+        .split(",")
+        .collect { it.trim() }
+        .findAll { !it.isEmpty() }
+def selectedNgxNativePlatforms
+if (requestedNgxPlatforms.size() == 1 && requestedNgxPlatforms[0].equalsIgnoreCase("all")) {
+    selectedNgxNativePlatforms = ngxNativePlatforms
+} else if (requestedNgxPlatforms.size() == 1 && requestedNgxPlatforms[0].equalsIgnoreCase("current")) {
+    if (ngxCurrentPlatform == null || !ngxNativePlatformByName.containsKey(ngxCurrentPlatform)) {
+        throw new GradleException("No NGX native platform is configured for this host. " +
+                "Pass -PngxPlatforms=windows-x64,linux-x64 explicitly.")
+    }
+    selectedNgxNativePlatforms = [ngxNativePlatformByName[ngxCurrentPlatform]]
+} else {
+    def unknownPlatforms = requestedNgxPlatforms.findAll { !ngxNativePlatformByName.containsKey(it) }
+    if (!unknownPlatforms.empty) {
+        throw new GradleException("Unknown NGX platform(s): ${unknownPlatforms.join(', ')}")
+    }
+    selectedNgxNativePlatforms = requestedNgxPlatforms.collect { ngxNativePlatformByName[it] }
+}
+
+def dlssSdkRootProvider = providers.environmentVariable("DLSS_SDK").map { file(it) }
+
+def bundleNgxNatives = tasks.register("bundleNgxNatives") {
+    group = "build"
+    description = "Bundles the NGX shim and ${ngxVendorConfig} DLSS native libraries into the mod resources."
+
+    inputs.property "ngxShimConfig", ngxShimConfig
+    inputs.property "ngxVendorConfig", ngxVendorConfig
+    selectedNgxNativePlatforms.each { platform ->
+        inputs.files(fileTree(ngxShimOutDir) {
+            include platform.shimIncludes
+        }).withPropertyName("ngxNatives.${platform.name}.shim")
+    }
+    outputs.dir(ngxNativeGenRoot)
+    outputs.upToDateWhen { false }
+
+    doLast {
+        delete(ngxNativeGenRoot)
+        def dlssSdkRoot = dlssSdkRootProvider.orNull
+        if (dlssSdkRoot == null) {
+            throw new GradleException("DLSS_SDK environment variable is not set. " +
+                    "Check out https://github.com/NVIDIA/DLSS and point DLSS_SDK at it.")
+        }
+        def missing = []
+        selectedNgxNativePlatforms.each { platform ->
+            if (fileTree(ngxShimOutDir) { include platform.shimIncludes }.files.empty) {
+                missing += "${platform.name} shim library in ${ngxShimOutDir} " +
+                        "(build it with: cmake -S native/ngx_shim -B build/cmake/ngx_shim " +
+                        "&& cmake --build build/cmake/ngx_shim --config Release)"
+            }
+            def platformVendorRoot = platform.vendorRoot(dlssSdkRoot, ngxVendorConfig)
+            def missingVendor = platform.vendorIncludes.findAll { vendorInclude ->
+                fileTree(platformVendorRoot) { include vendorInclude }.files.empty
+            }
+            if (!missingVendor.empty) {
+                missing += "${platform.name} vendor libraries ${missingVendor.join(', ')} in ${platformVendorRoot}"
+            }
+        }
+        if (!missing.empty) {
+            throw new GradleException("Missing NGX native inputs:\n - " + missing.join("\n - "))
+        }
+
+        copy {
+            selectedNgxNativePlatforms.each { platform ->
+                from(fileTree(ngxShimOutDir) { include platform.shimIncludes }) {
+                    into "vulkanite/natives/${platform.name}"
+                }
+                from(fileTree(platform.vendorRoot(dlssSdkRoot, ngxVendorConfig))) {
+                    include platform.vendorIncludes
+                    into "vulkanite/natives/${platform.name}"
+                }
+            }
+            into ngxNativeGenRoot
+        }
+    }
+}
+
+if (bundleNgxNativesRequested) {
+    sourceSets.main.resources.srcDir(files(ngxNativeGenRoot).builtBy(bundleNgxNatives))
+}

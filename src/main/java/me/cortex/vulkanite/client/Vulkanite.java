@@ -1,6 +1,9 @@
 package me.cortex.vulkanite.client;
 
 import me.cortex.vulkanite.acceleration.AccelerationManager;
+import me.cortex.vulkanite.dlss.DlssRayReconstruction;
+import me.cortex.vulkanite.dlss.DlssSuperResolution;
+import me.cortex.vulkanite.dlss.NgxRuntime;
 import me.cortex.vulkanite.lib.base.VContext;
 import me.cortex.vulkanite.lib.base.initalizer.VInitializer;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
@@ -43,6 +46,14 @@ public class Vulkanite {
 
     private final AccelerationManager accelerationManager;
 
+    /**
+     * DLSS features, created on first use so a machine without NGX never pays for them (and never
+     * fails at startup). Both share the single {@link NgxRuntime} NGX instance; see
+     * {@link me.cortex.vulkanite.dlss} for what each one needs from the renderer.
+     */
+    private DlssSuperResolution dlssSuperResolution;
+    private DlssRayReconstruction dlssRayReconstruction;
+
     public Vulkanite() {
         ctx = createVulkanContext();
 
@@ -74,6 +85,22 @@ public class Vulkanite {
         return ctx;
     }
 
+    /** The shared DLSS Super Resolution feature wrapper, created on first use. */
+    public synchronized DlssSuperResolution getDlssSuperResolution() {
+        if (dlssSuperResolution == null) {
+            dlssSuperResolution = new DlssSuperResolution(ctx);
+        }
+        return dlssSuperResolution;
+    }
+
+    /** The shared DLSS Ray Reconstruction feature wrapper, created on first use. */
+    public synchronized DlssRayReconstruction getDlssRayReconstruction() {
+        if (dlssRayReconstruction == null) {
+            dlssRayReconstruction = new DlssRayReconstruction(ctx);
+        }
+        return dlssRayReconstruction;
+    }
+
     public void addSyncedCallback(Runnable callback) {
         fencedCallback.enqueue(callback);
     }
@@ -81,6 +108,17 @@ public class Vulkanite {
     public void destroy() {
         if (accelerationManager != null)
             accelerationManager.cleanup();
+        // Order matters: NGX features hold device memory, so they must be released before NGX is shut
+        // down, and NGX must be shut down while the device is still alive (ngxshim_shutdown takes the
+        // VkDevice). Doing it here means a device-loss recovery path that rebuilds VContext also gets
+        // a clean NGX re-init, since NgxRuntime clears its failure latch on shutdown.
+        if (dlssSuperResolution != null)
+            dlssSuperResolution.destroy();
+        if (dlssRayReconstruction != null)
+            dlssRayReconstruction.destroy();
+        dlssSuperResolution = null;
+        dlssRayReconstruction = null;
+        NgxRuntime.INSTANCE.shutdown(ctx);
         ctx.cleanup();
     }
 

@@ -1,0 +1,210 @@
+name: Native NGX (DLSS)
+
+# Builds the NVIDIA NGX shim from the public NVIDIA/DLSS SDK and packages a mod jar with the DLSS
+# natives bundled. Kept separate from `check.yml` (which builds the plain mod on every push/PR)
+# because the shim needs a Windows runner, the Vulkan SDK and a full DLSS SDK checkout — and because
+# the resulting jar contains NVIDIA-licensed binaries that are never committed to this repository.
+#
+# Ported from Caustica's CI (LGPL-3.0-or-later); see THIRD_PARTY_NOTICES.md.
+
+on:
+  push:
+    branches: ['*']
+    paths:
+      - 'native/**'
+      - 'src/main/java/me/cortex/vulkanite/dlss/**'
+      - '.github/workflows/native-ngx.yml'
+  pull_request:
+    branches: ['*']
+    paths:
+      - 'native/**'
+      - 'src/main/java/me/cortex/vulkanite/dlss/**'
+      - '.github/workflows/native-ngx.yml'
+  workflow_dispatch:
+
+env:
+  DLSS_SDK_REF: v310.7.0
+  DLSS_SDK_PATH: third_party/DLSS
+  NGX_SHIM_CONFIG: release
+  NGX_VENDOR_CONFIG: rel
+  VULKAN_SDK_VERSION: 1.4.350.0
+  VULKAN_SDK_SHA256: b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2
+
+jobs:
+  native-windows:
+    name: Build Windows NGX shim
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout Vulkanite
+        uses: actions/checkout@v4
+
+      - name: Checkout DLSS SDK
+        uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/DLSS
+          ref: ${{ env.DLSS_SDK_REF }}
+          path: ${{ env.DLSS_SDK_PATH }}
+
+      - name: Setup Vulkan SDK
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: ${{ env.VULKAN_SDK_VERSION }}
+          vulkan-components: Vulkan-Headers, Vulkan-Loader
+          vulkan-use-cache: true
+
+      - name: Configure NGX shim
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ github.workspace }}/${{ env.DLSS_SDK_PATH }}
+        run: >
+          cmake -S native/ngx_shim
+          -B build/cmake/ngx_shim
+          -G "Visual Studio 17 2022"
+          -A x64
+
+      - name: Build NGX shim
+        shell: pwsh
+        run: cmake --build build/cmake/ngx_shim --config Release
+
+      - name: Upload Windows NGX shim
+        uses: actions/upload-artifact@v4
+        with:
+          name: ngxshim-windows-x64
+          path: build/native/ngx_shim/release/ngxshim.dll
+          if-no-files-found: error
+
+  native-linux:
+    name: Build Linux NGX shim
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Vulkanite
+        uses: actions/checkout@v4
+
+      - name: Checkout DLSS SDK
+        uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/DLSS
+          ref: ${{ env.DLSS_SDK_REF }}
+          path: ${{ env.DLSS_SDK_PATH }}
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libvulkan-dev
+
+      - name: Configure NGX shim
+        env:
+          DLSS_SDK: ${{ github.workspace }}/${{ env.DLSS_SDK_PATH }}
+          VULKAN_SDK: /usr
+        run: >
+          cmake -S native/ngx_shim
+          -B build/cmake/ngx_shim
+          -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build NGX shim
+        run: cmake --build build/cmake/ngx_shim --config Release
+
+      - name: Upload Linux NGX shim
+        uses: actions/upload-artifact@v4
+        with:
+          name: ngxshim-linux-x64
+          path: build/native/ngx_shim/release/libngxshim.so
+          if-no-files-found: error
+
+  package:
+    name: Build DLSS-bundled mod jar
+    runs-on: ubuntu-latest
+    needs:
+      - native-windows
+      - native-linux
+
+    steps:
+      - name: Checkout Vulkanite
+        uses: actions/checkout@v4
+
+      - name: Checkout DLSS SDK
+        uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/DLSS
+          ref: ${{ env.DLSS_SDK_REF }}
+          path: ${{ env.DLSS_SDK_PATH }}
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # gradle.properties carries the maintainer's machine-local settings (a Windows JDK path and a
+      # localhost proxy) that do not exist on CI runners. Strip them here instead of removing them
+      # from the file itself.
+      - name: Remove machine-local Gradle settings
+        run: |
+          sed -i \
+            -e '/^org\.gradle\.java\.home=/d' \
+            -e '/^systemProp\.http\.proxy/d' \
+            -e '/^systemProp\.https\.proxy/d' \
+            -e '/^systemProp\.socks/d' \
+            -e 's/-Dhttp\.proxyHost=[^ ]* *//g' \
+            -e 's/-Dhttp\.proxyPort=[^ ]* *//g' \
+            -e 's/-Dhttps\.proxyHost=[^ ]* *//g' \
+            -e 's/-Dhttps\.proxyPort=[^ ]* *//g' \
+            gradle.properties
+
+      - name: Download NGX shims
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ngxshim-*
+          path: build/native/ngx_shim/release
+          merge-multiple: true
+
+      - name: Build DLSS-bundled jar
+        env:
+          DLSS_SDK: ${{ github.workspace }}/${{ env.DLSS_SDK_PATH }}
+        run: >
+          ./gradlew build --no-daemon
+          -PbundleNgxNatives=true
+          -PngxPlatforms=windows-x64,linux-x64
+          -PngxVendorConfig=${{ env.NGX_VENDOR_CONFIG }}
+          -PngxShimConfig=${{ env.NGX_SHIM_CONFIG }}
+
+      # bundleNgxNatives already fails the build if an input is missing, but assert the natives
+      # actually landed inside the jar too — a task that silently stopped being wired to
+      # processResources would otherwise still produce a green build and a DLSS-less jar.
+      - name: Verify DLSS natives are bundled in the jar
+        run: |
+          jar=$(ls build/libs/*.jar | grep -v -- '-sources' | head -1)
+          echo "Inspecting ${jar}"
+          found=$(unzip -l "${jar}" | grep 'vulkanite/natives/' || true)
+          if [ -z "${found}" ]; then
+            echo "::error::no NGX natives found in ${jar} — bundleNgxNatives is not wired into processResources"
+            exit 1
+          fi
+          echo "${found}"
+          for expected in windows-x64/ngxshim.dll linux-x64/libngxshim.so \
+                          windows-x64/nvngx_dlss.dll windows-x64/nvngx_dlssd.dll \
+                          linux-x64/libnvidia-ngx-dlss.so linux-x64/libnvidia-ngx-dlssd.so; do
+            if ! echo "${found}" | grep -q "${expected}"; then
+              echo "::error::expected ${expected} in ${jar}"
+              exit 1
+            fi
+          done
+          echo "All expected NGX natives are present."
+
+      - name: Upload DLSS-bundled jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulkanite-dlss-bundled-jar
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
+          if-no-files-found: error

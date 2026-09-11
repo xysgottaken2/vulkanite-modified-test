@@ -28,3 +28,13 @@ run/
 bin/
 
 temp/
+
+# NVIDIA DLSS SDK checkout used to build native/ngx_shim (see native-ngx.yml).
+# NVIDIA-licensed binaries must never be committed.
+third_party/
+
+# Built NGX shim / extracted DLSS runtime libraries.
+**/ngxshim.dll
+**/libngxshim.so
+**/nvngx_*.dll
+**/libnvidia-ngx-*.so*
